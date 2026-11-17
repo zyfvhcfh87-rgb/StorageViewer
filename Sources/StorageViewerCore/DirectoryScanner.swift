@@ -54,7 +54,26 @@ public enum DirectoryScanner {
         progress: @escaping @Sendable (ScanProgress) -> Void = { _ in },
         isCancelled: @escaping @Sendable () -> Bool = { false }
     ) -> ScanOutcome {
-        ParallelScanner(progress: progress, isCancelled: isCancelled).run(url: url, displayName: displayName)
+        scan(url: url, displayName: displayName, deferDirectoryOpens: false, inlineResume: false, progress: progress, isCancelled: isCancelled)
+    }
+
+    /// Test-only entry point. `deferDirectoryOpens` makes every child-directory open fail
+    /// like EMFILE; `inlineResume` services each resume job on the publishing worker at the
+    /// moment it is queued — the earliest point another worker could run it.
+    static func scan(
+        url: URL,
+        displayName: String,
+        deferDirectoryOpens: Bool,
+        inlineResume: Bool,
+        progress: @escaping @Sendable (ScanProgress) -> Void = { _ in },
+        isCancelled: @escaping @Sendable () -> Bool = { false }
+    ) -> ScanOutcome {
+        ParallelScanner(
+            progress: progress,
+            isCancelled: isCancelled,
+            deferDirectoryOpens: deferDirectoryOpens,
+            inlineResume: inlineResume
+        ).run(url: url, displayName: displayName)
     }
 }
 
@@ -114,10 +133,12 @@ private final class WorkQueue: @unchecked Sendable {
     }
 
     /// Low priority: file-handle jobs are drained first, which closes folders and frees a slot.
-    func pushResume(path: String, names: [String], depth: Int, attachTo: Int) {
+    /// Returns false when the scan is stopping and the job was dropped.
+    @discardableResult
+    func pushResume(path: String, names: [String], depth: Int, attachTo: Int) -> Bool {
         cond.lock()
         defer { cond.unlock() }
-        guard accept else { return }
+        guard accept else { return false }
         jobs.insert(
             ScanJob(
                 id: -1,
@@ -131,6 +152,7 @@ private final class WorkQueue: @unchecked Sendable {
             at: 0
         )
         cond.signal()
+        return true
     }
 
     /// True when another worker can close a folder. False when waiting would stall the scan.
@@ -245,6 +267,8 @@ private func workerCount() -> Int {
 private final class ParallelScanner: @unchecked Sendable {
     private let progress: @Sendable (ScanProgress) -> Void
     private let isCancelled: @Sendable () -> Bool
+    private let deferDirectoryOpens: Bool
+    private let inlineResume: Bool
     private let queue = WorkQueue()
     private let stats = ScanStats()
     private let recordsLock = NSLock()
@@ -255,10 +279,14 @@ private final class ParallelScanner: @unchecked Sendable {
 
     init(
         progress: @escaping @Sendable (ScanProgress) -> Void,
-        isCancelled: @escaping @Sendable () -> Bool
+        isCancelled: @escaping @Sendable () -> Bool,
+        deferDirectoryOpens: Bool = false,
+        inlineResume: Bool = false
     ) {
         self.progress = progress
         self.isCancelled = isCancelled
+        self.deferDirectoryOpens = deferDirectoryOpens
+        self.inlineResume = inlineResume
     }
 
     func run(url: URL, displayName: String) -> ScanOutcome {
@@ -411,9 +439,11 @@ private final class ParallelScanner: @unchecked Sendable {
                     deferred.append(entry.name)
                     continue
                 }
-                let childFd = entry.name.withCString { openat(job.fd, $0, childFlags) }
+                let childFd = deferDirectoryOpens
+                    ? Int32(-1)
+                    : entry.name.withCString { openat(job.fd, $0, childFlags) }
                 if childFd < 0 {
-                    if errno == EMFILE || errno == ENFILE {
+                    if deferDirectoryOpens || errno == EMFILE || errno == ENFILE {
                         deferred.append(entry.name)
                     } else {
                         skipped += 1
@@ -436,11 +466,12 @@ private final class ParallelScanner: @unchecked Sendable {
             }
         }
 
-        if !deferred.isEmpty, let path = path(of: job.fd) {
-            queue.pushResume(path: path, names: deferred, depth: job.depth, attachTo: job.id)
-        } else {
+        let resumePath = deferred.isEmpty ? nil : path(of: job.fd)
+        if !deferred.isEmpty, resumePath == nil {
             skipped += deferred.count
         }
+        // Store before publishing: a resume worker can run the moment the job is queued
+        // and attaches its children to this record.
         store(job, DirRecord(
             name: job.name,
             denied: false,
@@ -450,6 +481,14 @@ private final class ParallelScanner: @unchecked Sendable {
             skipped: skipped,
             identity: identity
         ))
+        if let resumePath {
+            if inlineResume {
+                resume(ScanJob(id: -1, fd: -1, name: "", depth: job.depth, resumePath: resumePath, resumeNames: deferred, attachTo: job.id))
+            } else if !queue.pushResume(path: resumePath, names: deferred, depth: job.depth, attachTo: job.id) {
+                noteSkipped(deferred.count, to: job.id)
+                stats.add(files: 0, bytes: 0, skipped: deferred.count, progress: progress)
+            }
+        }
         stats.add(files: seen, bytes: bytes, skipped: skipped, progress: progress)
     }
 
@@ -500,7 +539,10 @@ private final class ParallelScanner: @unchecked Sendable {
             }
             guard !rest.isEmpty else { return }
             if !opened.isEmpty {
-                queue.pushResume(path: path, names: rest, depth: job.depth, attachTo: parentID)
+                if !queue.pushResume(path: path, names: rest, depth: job.depth, attachTo: parentID) {
+                    noteSkipped(rest.count, to: parentID)
+                    stats.add(files: 0, bytes: 0, skipped: rest.count, progress: progress)
+                }
                 return
             }
             tries += 1

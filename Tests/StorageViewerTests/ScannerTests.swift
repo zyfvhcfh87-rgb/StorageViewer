@@ -79,6 +79,43 @@ final class ScannerTests: XCTestCase {
         XCTAssertGreaterThanOrEqual(raised.rlim_cur, rlim_t(subdirs))
     }
 
+    func testDeferredFoldersSurviveAResumeServicedAtPublishTime() throws {
+        // Every directory open fails like EMFILE, and each resume job runs on the
+        // publishing worker the moment it would be queued. The parent record must
+        // already exist or the resumed children are silently dropped.
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let alpha = root.appendingPathComponent("alpha", isDirectory: true)
+        let inner = alpha.appendingPathComponent("inner", isDirectory: true)
+        try FileManager.default.createDirectory(at: inner, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: root.appendingPathComponent("beta", isDirectory: true), withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: root.appendingPathComponent("gamma", isDirectory: true), withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        try Data(repeating: 1, count: 10).write(to: alpha.appendingPathComponent("a.txt"))
+        try Data(repeating: 2, count: 5).write(to: inner.appendingPathComponent("deep.txt"))
+        try Data(repeating: 3, count: 20).write(to: root.appendingPathComponent("beta/b.txt"))
+        try Data(repeating: 4, count: 30).write(to: root.appendingPathComponent("gamma/g.txt"))
+
+        let outcome = DirectoryScanner.scan(
+            url: root,
+            displayName: "deferred",
+            deferDirectoryOpens: true,
+            inlineResume: true
+        )
+        let node = try XCTUnwrap(outcome.root)
+        XCTAssertFalse(outcome.cancelled)
+        XCTAssertEqual(outcome.skippedCount, 0)
+        XCTAssertEqual(outcome.filesSeen, 4)
+        XCTAssertEqual(node.byteSize, 65)
+        XCTAssertEqual(outcome.bytesCounted, 65)
+
+        let alphaNode = try XCTUnwrap(node.children.first { $0.name == "alpha" })
+        XCTAssertEqual(alphaNode.byteSize, 15)
+        let innerNode = try XCTUnwrap(alphaNode.children.first { $0.name == "inner" })
+        XCTAssertEqual(innerNode.byteSize, 5)
+        XCTAssertEqual(node.children.first { $0.name == "beta" }?.byteSize, 20)
+        XCTAssertEqual(node.children.first { $0.name == "gamma" }?.byteSize, 30)
+    }
+
     func testSymlinkIsNotFollowed() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
