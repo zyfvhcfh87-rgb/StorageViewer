@@ -15,8 +15,9 @@ public enum TreemapLayout {
     /// Squarified treemap. Rectangle area is proportional to `size`.
     /// Zero-size entries are omitted. The layout fills `bounds`.
     public static func layout(entries: [(id: UUID, size: Int64)], in bounds: CGRect) -> [TreemapItem] {
-        let usable = entries.filter { $0.size > 0 && bounds.width > 0 && bounds.height > 0 }
-        guard !usable.isEmpty, bounds.width > 0, bounds.height > 0 else { return [] }
+        guard bounds.width > 0, bounds.height > 0 else { return [] }
+        let usable = entries.filter { $0.size > 0 }
+        guard !usable.isEmpty else { return [] }
         let total = usable.reduce(Int64(0)) { $0 + $1.size }
         guard total > 0 else { return [] }
 
@@ -53,52 +54,71 @@ public enum TreemapLayout {
     }
 
     private static func squarify(_ sizes: [Double], x: Double, y: Double, dx: Double, dy: Double) -> [RectD] {
-        var remaining = sizes
         var result: [RectD] = []
         var x = x
         var y = y
         var dx = dx
         var dy = dy
+        var start = 0
 
-        while !remaining.isEmpty {
-            if remaining.count == 1 || dx <= 0.000_001 || dy <= 0.000_001 {
-                result.append(contentsOf: place(remaining, x: x, y: y, dx: max(dx, 0), dy: max(dy, 0)))
+        while start < sizes.count {
+            if sizes.count - start == 1 || dx <= 0.000_001 || dy <= 0.000_001 {
+                result.append(contentsOf: place(sizes[start...], x: x, y: y, dx: max(dx, 0), dy: max(dy, 0)))
                 break
             }
             var rowCount = 1
-            var best = worst(Array(remaining.prefix(1)), dx: dx, dy: dy)
-            while rowCount < remaining.count {
-                let candidate = worst(Array(remaining.prefix(rowCount + 1)), dx: dx, dy: dy)
-                if candidate <= best {
-                    best = candidate
-                    rowCount += 1
-                } else {
-                    break
-                }
+            var sum = sizes[start]
+            var smallest = sizes[start]
+            var largest = sizes[start]
+            var best = worstRatio(sum: sum, smallest: smallest, largest: largest, dx: dx, dy: dy)
+            while start + rowCount < sizes.count {
+                let size = sizes[start + rowCount]
+                let nextSum = sum + size
+                let nextSmallest = min(smallest, size)
+                let nextLargest = max(largest, size)
+                let candidate = worstRatio(
+                    sum: nextSum,
+                    smallest: nextSmallest,
+                    largest: nextLargest,
+                    dx: dx,
+                    dy: dy
+                )
+                guard candidate <= best else { break }
+                best = candidate
+                sum = nextSum
+                smallest = nextSmallest
+                largest = nextLargest
+                rowCount += 1
             }
-            let row = Array(remaining.prefix(rowCount))
+            let row = sizes[start..<(start + rowCount)]
             result.append(contentsOf: place(row, x: x, y: y, dx: dx, dy: dy))
             let rest = leftover(row, x: x, y: y, dx: dx, dy: dy)
             x = rest.x
             y = rest.y
             dx = rest.w
             dy = rest.h
-            remaining.removeFirst(rowCount)
+            start += rowCount
         }
         return result
     }
 
-    private static func worst(_ sizes: [Double], dx: Double, dy: Double) -> Double {
-        let rects = place(sizes, x: 0, y: 0, dx: dx, dy: dy)
-        var worstRatio = 0.0
-        for rect in rects {
-            if rect.w <= 0 || rect.h <= 0 { return .infinity }
-            worstRatio = max(worstRatio, max(rect.w / rect.h, rect.h / rect.w))
-        }
-        return worstRatio
+    /// Worst width-to-height ratio of a row, without placing it.
+    /// The row runs along the longer edge, so every rect shares one side length:
+    /// `sum / shorterEdge`. Ratio `i` is `max(edge² / sizeᵢ, sizeᵢ / edge²)`.
+    private static func worstRatio(
+        sum: Double,
+        smallest: Double,
+        largest: Double,
+        dx: Double,
+        dy: Double
+    ) -> Double {
+        guard sum > 0, smallest > 0, dx > 0, dy > 0 else { return .infinity }
+        let edge = dx >= dy ? sum / dy : sum / dx
+        let squared = edge * edge
+        return max(squared / smallest, largest / squared)
     }
 
-    private static func place(_ sizes: [Double], x: Double, y: Double, dx: Double, dy: Double) -> [RectD] {
+    private static func place(_ sizes: ArraySlice<Double>, x: Double, y: Double, dx: Double, dy: Double) -> [RectD] {
         let sum = sizes.reduce(0, +)
         guard sum > 0, dx > 0, dy > 0 else { return [] }
         if dx >= dy {
@@ -123,7 +143,7 @@ public enum TreemapLayout {
         return rects
     }
 
-    private static func leftover(_ sizes: [Double], x: Double, y: Double, dx: Double, dy: Double) -> RectD {
+    private static func leftover(_ sizes: ArraySlice<Double>, x: Double, y: Double, dx: Double, dy: Double) -> RectD {
         let sum = sizes.reduce(0, +)
         if dx >= dy {
             let width = dy > 0 ? sum / dy : 0

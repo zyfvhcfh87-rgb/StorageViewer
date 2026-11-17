@@ -1,6 +1,7 @@
 #!/bin/zsh
 set -euo pipefail
 cd "$(dirname "$0")/.."
+swift test
 swift build -c release
 APP="StorageViewer.app"
 rm -rf "$APP"

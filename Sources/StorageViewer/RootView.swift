@@ -198,8 +198,6 @@ private struct ResultsView: View {
             BreadcrumbBar()
             Rectangle().fill(Theme.border).frame(height: 1)
             arrangement
-                .accessibilityIdentifier("flat-layout")
-                .accessibilityValue(layout.rawValue)
             Rectangle().fill(Theme.border).frame(height: 1)
             Footer(filterFocused: filterFocused)
                 .frame(height: 36)

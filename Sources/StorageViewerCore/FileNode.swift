@@ -31,6 +31,8 @@ public final class FileNode: Identifiable, @unchecked Sendable {
     public var subtreeMix: [FileCategory: Int64] = [:]
     /// Nil when the scan could not read an identity. Edits then still use the path.
     public var fileID: FileIdentity?
+    /// True for a folder that is the mount point of another volume. Its contents are not scanned.
+    public let isMount: Bool
     public internal(set) weak var parent: FileNode?
 
     public init(
@@ -40,7 +42,8 @@ public final class FileNode: Identifiable, @unchecked Sendable {
         byteSize: Int64,
         category: FileCategory,
         children: [FileNode] = [],
-        fileID: FileIdentity? = nil
+        fileID: FileIdentity? = nil,
+        isMount: Bool = false
     ) {
         self.id = id
         self.name = name
@@ -49,6 +52,7 @@ public final class FileNode: Identifiable, @unchecked Sendable {
         self.category = category
         self.children = children
         self.fileID = fileID
+        self.isMount = isMount
     }
 
     /// Parent links are weak, so they have to be wired after the root is retained.

@@ -10,7 +10,7 @@ public enum NameFilter {
     public static func matches(name: String, query: String) -> Bool {
         let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
         if trimmed.isEmpty { return true }
-        return name.range(of: trimmed, options: [.caseInsensitive, .diacriticInsensitive]) != nil
+        return nameContains(name, query: trimmed)
     }
 
     /// Rows for the list. An empty query follows `expanded`. A query keeps a folder when any nested name matches, and shows that chain even if the folder is collapsed.
@@ -48,9 +48,11 @@ public enum NameFilter {
 
     /// The node itself, or a nested name, matches `query`. One walk.
     public static func hits(in nodes: [FileNode], query: String) -> Set<UUID> {
+        let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return allIDs(in: nodes) }
         var ids = Set<UUID>()
         func walk(_ node: FileNode) -> Bool {
-            var hit = matches(name: node.name, query: query)
+            var hit = nameContains(node.name, query: trimmed)
             if node.isDirectory {
                 for child in node.children where walk(child) {
                     hit = true
@@ -63,5 +65,38 @@ public enum NameFilter {
             _ = walk(node)
         }
         return ids
+    }
+
+    /// Ids of `nodes` whose own name or any nested name matches `query`.
+    /// Stops descending a folder as soon as its name matches, so a map only
+    /// needs to know which blocks to keep bright, not every name below them.
+    public static func folderHits(in nodes: [FileNode], query: String) -> Set<UUID> {
+        let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return Set(nodes.map(\.id)) }
+        var ids = Set<UUID>()
+        for node in nodes where subtreeMatches(node, query: trimmed) {
+            ids.insert(node.id)
+        }
+        return ids
+    }
+
+    private static func subtreeMatches(_ node: FileNode, query: String) -> Bool {
+        if nameContains(node.name, query: query) { return true }
+        guard node.isDirectory else { return false }
+        return node.children.contains { subtreeMatches($0, query: query) }
+    }
+
+    private static func allIDs(in nodes: [FileNode]) -> Set<UUID> {
+        var ids = Set<UUID>()
+        func walk(_ node: FileNode) {
+            ids.insert(node.id)
+            for child in node.children { walk(child) }
+        }
+        for node in nodes { walk(node) }
+        return ids
+    }
+
+    private static func nameContains(_ name: String, query: String) -> Bool {
+        name.range(of: query, options: [.caseInsensitive, .diacriticInsensitive]) != nil
     }
 }

@@ -194,15 +194,7 @@ private struct CossFacts {
 }
 
 private func kindName(_ category: FileCategory) -> String {
-    switch category {
-    case .code: "Code"
-    case .images: "Images"
-    case .video: "Video"
-    case .audio: "Audio"
-    case .archives: "Archives"
-    case .documents: "Documents"
-    case .other: "Other"
-    }
+    category.rawValue.capitalized
 }
 
 private func rankedChildren(_ folder: FileNode) -> [FileNode] {
@@ -375,10 +367,9 @@ private struct LedgerScreen<Map: View, List: View>: View {
     var body: some View {
         VStack(spacing: 0) {
             HStack(spacing: 0) {
-                stat("Counted", facts.counted)
-                stat("Items", facts.childCount)
-                stat("Largest", facts.largest)
-                stat("Skipped", facts.skipped)
+                ForEach(Array(stats.enumerated()), id: \.offset) { index, item in
+                    stat(item.label, item.value, divider: index > 0)
+                }
             }
             .background(CossChrome.card)
             Rectangle().fill(Theme.border).frame(height: 1)
@@ -406,7 +397,16 @@ private struct LedgerScreen<Map: View, List: View>: View {
         .accessibilityLabel("Ledger")
     }
 
-    private func stat(_ label: String, _ value: String) -> some View {
+    private var stats: [(label: String, value: String)] {
+        [
+            ("Counted", facts.counted),
+            ("Items", facts.childCount),
+            ("Largest", facts.largest),
+            ("Skipped", facts.skipped)
+        ]
+    }
+
+    private func stat(_ label: String, _ value: String, divider: Bool) -> some View {
         VStack(alignment: .leading, spacing: 6) {
             Text(label.uppercased())
                 .font(.system(size: 11, weight: .semibold))
@@ -422,7 +422,7 @@ private struct LedgerScreen<Map: View, List: View>: View {
         .padding(.vertical, 16)
         .frame(maxWidth: .infinity, alignment: .leading)
         .overlay(alignment: .leading) {
-            if label != "Counted" {
+            if divider {
                 Rectangle().fill(Theme.border).frame(width: 1)
             }
         }

@@ -1,6 +1,6 @@
+@testable import StorageViewerCore
 import Darwin
 import Foundation
-import StorageViewerCore
 import XCTest
 
 final class ScannerTests: XCTestCase {
@@ -79,6 +79,43 @@ final class ScannerTests: XCTestCase {
         XCTAssertGreaterThanOrEqual(raised.rlim_cur, rlim_t(subdirs))
     }
 
+    func testDeferredFoldersSurviveAResumeServicedAtPublishTime() throws {
+        // Every directory open fails like EMFILE, and each resume job runs on the
+        // publishing worker the moment it would be queued. The parent record must
+        // already exist or the resumed children are silently dropped.
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let alpha = root.appendingPathComponent("alpha", isDirectory: true)
+        let inner = alpha.appendingPathComponent("inner", isDirectory: true)
+        try FileManager.default.createDirectory(at: inner, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: root.appendingPathComponent("beta", isDirectory: true), withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: root.appendingPathComponent("gamma", isDirectory: true), withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        try Data(repeating: 1, count: 10).write(to: alpha.appendingPathComponent("a.txt"))
+        try Data(repeating: 2, count: 5).write(to: inner.appendingPathComponent("deep.txt"))
+        try Data(repeating: 3, count: 20).write(to: root.appendingPathComponent("beta/b.txt"))
+        try Data(repeating: 4, count: 30).write(to: root.appendingPathComponent("gamma/g.txt"))
+
+        let outcome = DirectoryScanner.scan(
+            url: root,
+            displayName: "deferred",
+            deferDirectoryOpens: true,
+            inlineResume: true
+        )
+        let node = try XCTUnwrap(outcome.root)
+        XCTAssertFalse(outcome.cancelled)
+        XCTAssertEqual(outcome.skippedCount, 0)
+        XCTAssertEqual(outcome.filesSeen, 4)
+        XCTAssertEqual(node.byteSize, 65)
+        XCTAssertEqual(outcome.bytesCounted, 65)
+
+        let alphaNode = try XCTUnwrap(node.children.first { $0.name == "alpha" })
+        XCTAssertEqual(alphaNode.byteSize, 15)
+        let innerNode = try XCTUnwrap(alphaNode.children.first { $0.name == "inner" })
+        XCTAssertEqual(innerNode.byteSize, 5)
+        XCTAssertEqual(node.children.first { $0.name == "beta" }?.byteSize, 20)
+        XCTAssertEqual(node.children.first { $0.name == "gamma" }?.byteSize, 30)
+    }
+
     func testSymlinkIsNotFollowed() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
@@ -120,6 +157,51 @@ final class ScannerTests: XCTestCase {
         XCTAssertTrue(denied.rootDenied)
         XCTAssertNil(denied.root)
         XCTAssertFalse(denied.missing)
+    }
+
+    func testBulkEntryParsesADeviceWithTheTopBitSet() throws {
+        // getattrlistbulk reports dev_t as a raw UInt32. devfs devices set bit 31,
+        // and converting those to a signed dev_t used to trap while scanning "/".
+        let nameBytes = Array("dev".utf8) + [0]
+        let attributeBytes = 4 + MemoryLayout<attribute_set_t>.size + MemoryLayout<attrreference_t>.size
+            + 4 + 4 + 8 + 4 + 8
+        let length = attributeBytes + nameBytes.count
+        let buffer = UnsafeMutableRawPointer.allocate(byteCount: length, alignment: 16)
+        defer { buffer.deallocate() }
+
+        buffer.storeBytes(of: UInt32(length), toByteOffset: 0, as: UInt32.self)
+        var returned = attribute_set_t()
+        returned.commonattr = UInt32(ATTR_CMN_NAME) | UInt32(ATTR_CMN_DEVID) | UInt32(ATTR_CMN_OBJTYPE)
+            | UInt32(ATTR_CMN_FILEID) | UInt32(ATTR_CMN_ERROR)
+        returned.fileattr = UInt32(ATTR_FILE_DATALENGTH)
+        buffer.storeBytes(of: returned, toByteOffset: 4, as: attribute_set_t.self)
+
+        let referenceOrigin = 4 + MemoryLayout<attribute_set_t>.size
+        var reference = attrreference_t()
+        reference.attr_dataoffset = Int32(attributeBytes - referenceOrigin)
+        reference.attr_length = UInt32(nameBytes.count)
+        buffer.storeBytes(of: reference, toByteOffset: referenceOrigin, as: attrreference_t.self)
+
+        var cursor = referenceOrigin + MemoryLayout<attrreference_t>.size
+        buffer.storeBytes(of: UInt32(0xAAEB_20B1), toByteOffset: cursor, as: UInt32.self)
+        cursor += 4
+        buffer.storeBytes(of: UInt32(2), toByteOffset: cursor, as: UInt32.self)
+        cursor += 4
+        buffer.storeBytes(of: UInt64(42), toByteOffset: cursor, as: UInt64.self)
+        cursor += 8
+        buffer.storeBytes(of: UInt32(0), toByteOffset: cursor, as: UInt32.self)
+        cursor += 4
+        buffer.storeBytes(of: Int64(0), toByteOffset: cursor, as: Int64.self)
+        cursor += 8
+        nameBytes.withUnsafeBytes { raw in
+            buffer.advanced(by: cursor).copyMemory(from: raw.baseAddress!, byteCount: raw.count)
+        }
+
+        let entry = try XCTUnwrap(parseBulkEntry(base: buffer, length: length))
+        XCTAssertEqual(entry.name, "dev")
+        XCTAssertEqual(entry.kind, .directory)
+        XCTAssertEqual(entry.device, 0xAAEB_20B1)
+        XCTAssertEqual(entry.inode, 42)
     }
 
     func testCancelBeforeWork() {

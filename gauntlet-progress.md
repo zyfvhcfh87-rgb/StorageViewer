@@ -9,3 +9,5 @@ Round 1: scanner, treemap, and the SwiftUI shell are in the project. Tests are t
 Verified: `swift test` passed (11). A live scan of this folder reported 230,000,816 bytes, matching an independent walk to the byte. `.build` is 228,893,871 bytes, shown as 218 MB and 99.5% in both the list and the treemap. Zoom, row selection, and the name filter were exercised in the running window. `/cursor/stores/self/media` is not on this Mac; the screenshot is `storageviewer-v1.png` in the project.
 
 Scan speed, release build, warm cache: `/usr` (22,049 files, same 2,143,252,725 bytes) went from about 70 ms to about 38 ms. `~/Library/Application Support` (210,738 files) went from about 1.03 s to about 0.42 s. The walk uses `openat` plus `getattrlistbulk` on four workers.
+
+Round 2: audit cleanup — copy and scan run off the main thread, partial listings are never shown as whole, wide folders lay out without prefix copies, zoom reuses mask geometry, one shared menu list, bulk-entry errors are skipped instead of shown as zero-byte files, the map filter stops at matching folders, and mount points are read-only. `swift test` passed (29).

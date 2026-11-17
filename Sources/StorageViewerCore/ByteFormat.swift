@@ -3,7 +3,8 @@ import Foundation
 public enum ByteFormat {
     public static func bytes(_ value: Int64) -> String {
         let negative = value < 0
-        var magnitude = Double(negative ? -value : value)
+        var magnitude = Double(value)
+        if negative { magnitude = -magnitude }
         let units = ["B", "KB", "MB", "GB", "TB", "PB"]
         var unit = 0
         while magnitude >= 1024, unit < units.count - 1 {
@@ -12,7 +13,7 @@ public enum ByteFormat {
         }
         let number: String
         if unit == 0 {
-            number = countFormatter.string(from: NSNumber(value: Int64(magnitude))) ?? "0"
+            number = lockedString(countFormatter, NSNumber(value: Int64(magnitude))) ?? "0"
         } else if magnitude >= 100 {
             number = fraction(magnitude, digits: 0)
         } else if magnitude >= 10 {

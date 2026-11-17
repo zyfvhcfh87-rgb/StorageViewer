@@ -201,7 +201,7 @@ final class ScanSession {
     }
 
     func zoom(_ node: FileNode) {
-        guard node.isDirectory else {
+        guard node.isDirectory, !node.isMount else {
             selectFromMap(node.id)
             return
         }
@@ -221,7 +221,7 @@ final class ScanSession {
     }
 
     func toggleDisclosure(_ node: FileNode) {
-        guard node.isDirectory else { return }
+        guard node.isDirectory, !node.isMount else { return }
         let previous = navigation
         withAnimation(Self.browse) {
             if expanded.contains(node.id) {
@@ -293,16 +293,32 @@ final class ScanSession {
 
     func paste(onto node: FileNode) {
         guard let copiedNode else { return }
-        perform {
-            let created = try TreeEditor.paste(copiedNode, onto: node, rootURL: try requireRootURL())
-            revealCreated(created)
+        copy {
+            try TreeEditor.preparePaste(copiedNode, onto: node, rootURL: try self.requireRootURL())
         }
     }
 
     func duplicate(_ node: FileNode) {
-        perform {
-            let created = try TreeEditor.duplicate(node, rootURL: try requireRootURL())
-            revealCreated(created)
+        copy {
+            try TreeEditor.prepareDuplicate(node, rootURL: try self.requireRootURL())
+        }
+    }
+
+    /// The copy and the scan of the result can take a while, so they run off the main actor.
+    private func copy(_ prepare: @escaping @MainActor () throws -> TreeEditor.CopyWork) {
+        let generation = generation
+        Task { @MainActor in
+            do {
+                let work = try prepare()
+                let created = try await Task.detached(priority: .userInitiated) {
+                    try TreeEditor.performCopy(work)
+                }.value
+                guard self.generation == generation else { return }
+                TreeEditor.attachCopy(created, to: work)
+                revealCreated(created)
+            } catch {
+                treeError = error.localizedDescription
+            }
         }
     }
 
