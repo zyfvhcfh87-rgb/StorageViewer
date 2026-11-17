@@ -19,6 +19,7 @@ struct TreemapView: View {
     @State private var playback = ZoomPlayback()
     @State private var layouts = LayoutMemo()
     @State private var hitCache = HitCache()
+    @State private var textCache = TextCache()
 
     var body: some View {
         GeometryReader { geo in
@@ -158,7 +159,7 @@ struct TreemapView: View {
         return hitCache.lookup(key) {
             var ids = Set<UUID>()
             for item in folders {
-                ids.formUnion(NameFilter.hits(in: item.children, query: query))
+                ids.formUnion(NameFilter.folderHits(in: item.children, query: query))
             }
             return ids
         }
@@ -243,12 +244,26 @@ struct TreemapView: View {
         let strength = (dimmed ? 0.16 : 1) * opacity
         let path = Path(rect)
         let tone = block.tone
-        context.drawLayer { layer in
-            layer.clip(to: path)
-            layer.fill(path, with: .color(Theme.color(for: block.node.category).opacity(strength)))
-            if !dimmed, rect.width > 16, rect.height > 16, opacity > 0.4 {
-                let mark = (tone.lightMark ? Color.white : Color.black).opacity(CGFloat(BlockPattern.markOpacity) * opacity)
-                paint(marks(for: block, in: rect), color: mark, into: &layer)
+        // A context copy keeps the clip local without paying for a transparency
+        // layer on every block on every frame.
+        var layer = context
+        layer.clip(to: path)
+        layer.fill(path, with: .color(Theme.color(for: block.node.category).opacity(strength)))
+        if !dimmed, rect.width > 16, rect.height > 16, opacity > 0.4 {
+            let mark = (tone.lightMark ? Color.white : Color.black).opacity(CGFloat(BlockPattern.markOpacity) * opacity)
+            if let prepared = block.prepared, block.preparedRect.width > 0.01, block.preparedRect.height > 0.01 {
+                if block.preparedRect != rect {
+                    // A zoom moved this block. Reuse the geometry drawn at the settled size
+                    // instead of rebuilding thousands of marks on every frame.
+                    let scale = rect.width / block.preparedRect.width
+                    var transform = CGAffineTransform(scaleX: scale, y: scale)
+                    transform.tx = rect.minX - block.preparedRect.minX * scale
+                    transform.ty = rect.minY - block.preparedRect.minY * scale
+                    layer.transform = transform
+                }
+                paint(prepared, color: mark, into: &layer)
+            } else {
+                paint(markDrawing(for: tone, in: rect), color: mark, into: &layer)
             }
         }
     }
@@ -273,25 +288,28 @@ struct TreemapView: View {
             )
         }
         guard !dimmed, rect.width > 44, rect.height > 14, opacity > 0.8 else { return }
-        context.drawLayer { layer in
-            layer.clip(to: Path(rect.insetBy(dx: 2, dy: 1)))
-            let ink = (selected ? Theme.onSelection : Theme.text).opacity(opacity)
-            let showsSize = rect.height > 28 && rect.width > 72
-            if let plate = labelPlate(in: rect, measure: block.measure, showsSize: showsSize) {
-                paintLabelBacking(selected: selected, plate: plate, opacity: opacity, on: &layer)
-            }
+        var layer = context
+        layer.clip(to: Path(rect.insetBy(dx: 2, dy: 1)))
+        let ink = (selected ? Theme.onSelection : Theme.text).opacity(opacity)
+        let showsSize = rect.height > 28 && rect.width > 72
+        if let plate = labelPlate(in: rect, measure: block.measure, showsSize: showsSize) {
+            paintLabelBacking(selected: selected, plate: plate, opacity: opacity, on: &layer)
+        }
+        var nameText = textCache.texts(for: block, revision: revision, in: context).name
+        nameText.shading = .color(ink)
+        layer.draw(
+            nameText,
+            at: CGPoint(x: rect.minX + 5, y: rect.minY + 9),
+            anchor: .leading
+        )
+        if showsSize {
+            var sizeText = textCache.texts(for: block, revision: revision, in: context).size
+            sizeText.shading = .color(ink.opacity(0.78))
             layer.draw(
-                Text(block.node.name).font(.system(size: 10, weight: .medium)).foregroundColor(ink),
-                at: CGPoint(x: rect.minX + 5, y: rect.minY + 9),
+                sizeText,
+                at: CGPoint(x: rect.minX + 5, y: rect.minY + 21),
                 anchor: .leading
             )
-            if showsSize {
-                layer.draw(
-                    Text(block.measure.sizeText).font(.system(size: 10)).foregroundColor(ink.opacity(0.78)),
-                    at: CGPoint(x: rect.minX + 5, y: rect.minY + 21),
-                    anchor: .leading
-                )
-            }
         }
     }
 
@@ -397,13 +415,6 @@ private func paint(_ drawing: MarkDrawing, color: Color, into layer: inout Graph
     }
 }
 
-private func marks(for block: PlacedBlock, in rect: CGRect) -> MarkDrawing {
-    if let prepared = block.prepared, block.preparedRect == rect {
-        return prepared
-    }
-    return markDrawing(for: block.tone, in: rect)
-}
-
 private final class ZoomPlayback: @unchecked Sendable {
     private var timer: Timer?
     private let duration = 0.48
@@ -461,6 +472,33 @@ private final class HitCache {
     }
 }
 
+/// Resolved label text per node, so a zoom flight does not lay out every label
+/// again on every frame. Cleared whenever the tree revision changes.
+private final class TextCache {
+    private var key = ""
+    private var entries: [UUID: (name: GraphicsContext.ResolvedText, size: GraphicsContext.ResolvedText)] = [:]
+
+    func texts(
+        for block: PlacedBlock,
+        revision: Int,
+        in context: GraphicsContext
+    ) -> (name: GraphicsContext.ResolvedText, size: GraphicsContext.ResolvedText) {
+        let next = "\(revision)"
+        if key != next {
+            key = next
+            entries.removeAll(keepingCapacity: true)
+        }
+        if let hit = entries[block.node.id] { return hit }
+        if entries.count > 4_096 { entries.removeAll(keepingCapacity: true) }
+        let resolved = (
+            name: context.resolve(Text(block.node.name).font(.system(size: 10, weight: .medium))),
+            size: context.resolve(Text(block.measure.sizeText).font(.system(size: 10)))
+        )
+        entries[block.node.id] = resolved
+        return resolved
+    }
+}
+
 private final class LayoutMemo {
     private var stored: [String: [PlacedBlock]] = [:]
 
@@ -479,7 +517,7 @@ private struct PlacedBlock {
     var rect: CGRect
     var tone: BlockTone
     var measure: LabelMeasure
-    /// Mask geometry for `preparedRect`. Unused while a zoom has moved `rect`.
+    /// Mask geometry for `preparedRect`. A zoom moves `rect`, so it is drawn through a transform.
     var prepared: MarkDrawing?
     var preparedRect: CGRect
 }

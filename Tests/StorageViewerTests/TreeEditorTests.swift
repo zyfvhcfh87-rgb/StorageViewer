@@ -5,15 +5,9 @@ import XCTest
 
 final class TreeEditorTests: XCTestCase {
     func testRenameCopyPasteDuplicateAndTrashMatchTheDisk() throws {
-        let scratch = URL(fileURLWithPath: #filePath)
-            .deletingLastPathComponent()
-            .deletingLastPathComponent()
-            .deletingLastPathComponent()
-            .appendingPathComponent("ScratchOps")
-        if FileManager.default.fileExists(atPath: scratch.path) {
-            try FileManager.default.removeItem(at: scratch)
-        }
+        let scratch = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: scratch.appendingPathComponent("dest"), withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: scratch) }
         try Data(repeating: 1, count: 20).write(to: scratch.appendingPathComponent("alpha.txt"))
         try Data(repeating: 2, count: 10).write(to: scratch.appendingPathComponent("beta.txt"))
         try Data(repeating: 3, count: 5).write(to: scratch.appendingPathComponent("dest/inside.txt"))
@@ -58,8 +52,6 @@ final class TreeEditorTests: XCTestCase {
         XCTAssertEqual(try diskBytes(scratch), root.byteSize)
         XCTAssertEqual(Set(try names(scratch)), Set(root.children.map(\.name)))
         XCTAssertEqual(Set(try names(scratch.appendingPathComponent("dest"))), Set(dest.children.map(\.name)))
-
-        try restoreSample(scratch)
     }
 
     func testCaseOnlyRenameAndAReplacedFileIsLeftAlone() throws {
@@ -97,6 +89,26 @@ final class TreeEditorTests: XCTestCase {
         XCTAssertEqual(other.name, "other.txt")
     }
 
+    func testMountNodesAreNotEdited() throws {
+        let mount = FileNode(name: "Other", isDirectory: true, byteSize: 0, category: .other, isMount: true)
+        let file = FileNode(name: "a.txt", isDirectory: false, byteSize: 1, category: .documents)
+        let root = FileNode(name: "root", isDirectory: true, byteSize: 1, category: .documents, children: [mount, file])
+        root.linkParents()
+        let rootURL = FileManager.default.temporaryDirectory
+
+        XCTAssertThrowsError(try TreeEditor.rename(mount, to: "renamed", rootURL: rootURL)) {
+            XCTAssertEqual($0 as? TreeEditError, .mountPoint)
+        }
+        XCTAssertThrowsError(try TreeEditor.trash(mount, rootURL: rootURL)) {
+            XCTAssertEqual($0 as? TreeEditError, .mountPoint)
+        }
+        XCTAssertThrowsError(try TreeEditor.duplicate(mount, rootURL: rootURL)) {
+            XCTAssertEqual($0 as? TreeEditError, .mountPoint)
+        }
+        XCTAssertFalse(TreeEditor.canPaste(file, onto: mount))
+        XCTAssertFalse(TreeEditor.canPaste(mount, onto: root))
+    }
+
     private func names(_ url: URL) throws -> [String] {
         try FileManager.default.contentsOfDirectory(atPath: url.path)
     }
@@ -117,12 +129,4 @@ final class TreeEditorTests: XCTestCase {
         return total
     }
 
-    private func restoreSample(_ scratch: URL) throws {
-        if FileManager.default.fileExists(atPath: scratch.path) {
-            try FileManager.default.removeItem(at: scratch)
-        }
-        try FileManager.default.createDirectory(at: scratch.appendingPathComponent("notes"), withIntermediateDirectories: true)
-        try Data("Scratch folder for the item menu.\n".utf8).write(to: scratch.appendingPathComponent("readme.txt"))
-        try Data("Hello from notes.\n".utf8).write(to: scratch.appendingPathComponent("notes/hello.txt"))
-    }
 }
