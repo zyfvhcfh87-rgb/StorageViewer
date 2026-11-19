@@ -10,10 +10,17 @@ struct RootView: View {
         FlatLayout(rawValue: layoutRaw) ?? .foundation
     }
 
+    private var layoutBinding: Binding<FlatLayout> {
+        Binding(
+            get: { layout },
+            set: { layoutRaw = $0.rawValue }
+        )
+    }
+
     var body: some View {
-        @Bindable var session = session
+        @Bindable var bindableSession = session
         VStack(spacing: 0) {
-            TopBar()
+            TopBar(layout: layoutBinding)
                 .padding(.leading, 78)
                 .padding(.trailing, 12)
                 .frame(height: 48)
@@ -35,17 +42,15 @@ struct RootView: View {
         .onChange(of: session.focusFilterTick) { _, _ in
             filterFocused = true
         }
-        .sheet(isPresented: Binding(
-            get: { session.renameTarget != nil },
-            set: { if !$0 { session.renameTarget = nil } }
-        )) {
-            if let node = session.renameTarget {
-                RenameSheet(original: node.name) {
+        .sheet(item: $bindableSession.renameTarget) { node in
+            RenameSheet(original: node.name) {
+                session.renameTarget = nil
+            } onSave: { name in
+                let error = session.commitRename(node, to: name)
+                if error == nil {
                     session.renameTarget = nil
-                } onSave: { name in
-                    session.commitRename(node, to: name)
-                    if session.treeError == nil { session.renameTarget = nil }
                 }
+                return error
             }
         }
         .alert(
@@ -106,14 +111,7 @@ struct RootView: View {
 
 private struct TopBar: View {
     @Environment(ScanSession.self) private var session
-    @AppStorage(FlatLayout.storageKey) private var layoutRaw = FlatLayout.foundation.rawValue
-
-    private var layout: Binding<FlatLayout> {
-        Binding(
-            get: { FlatLayout(rawValue: layoutRaw) ?? .foundation },
-            set: { layoutRaw = $0.rawValue }
-        )
-    }
+    @Binding var layout: FlatLayout
 
     var body: some View {
         HStack(spacing: 10) {
@@ -125,7 +123,7 @@ private struct TopBar: View {
             Rectangle()
                 .fill(Theme.border)
                 .frame(width: 1, height: 14)
-            LayoutPicker(layout: layout)
+            LayoutPicker(layout: $layout)
             OpenMenu()
             if let path = session.rootURL?.path {
                 Text(path)
@@ -197,21 +195,15 @@ private struct ResultsView: View {
             }
             BreadcrumbBar()
             Rectangle().fill(Theme.border).frame(height: 1)
-            arrangement
-                .accessibilityIdentifier("flat-layout")
-                .accessibilityValue(layout.rawValue)
+            CossArrangement(layout: layout) {
+                map
+            } list: {
+                list
+            }
             Rectangle().fill(Theme.border).frame(height: 1)
             Footer(filterFocused: filterFocused)
                 .frame(height: 36)
                 .background(Theme.panel)
-        }
-    }
-
-    private var arrangement: some View {
-        CossArrangement(layout: layout) {
-            map
-        } list: {
-            list
         }
     }
 
@@ -221,7 +213,6 @@ private struct ResultsView: View {
             LargestListView(
                 root: root,
                 expanded: session.expanded,
-                rootSize: root.byteSize,
                 filter: session.filter,
                 selection: session.selection,
                 scrollToken: session.listScrollToken,
@@ -240,7 +231,7 @@ private struct ResultsView: View {
                 selection: session.selection,
                 hovered: session.hoveredID,
                 filter: session.filter,
-                onSelect: { session.selectFromMap($0.id) },
+                onSelect: { session.selectFromMap($0) },
                 onZoom: { session.zoom($0) },
                 onHover: { session.hover($0) },
                 revision: session.treeRevision,
@@ -254,6 +245,8 @@ private struct BreadcrumbBar: View {
     @Environment(ScanSession.self) private var session
 
     var body: some View {
+        let _ = session.treeRevision
+        let chain = session.chain
         HStack(spacing: 0) {
             HistoryButton(
                 systemName: "chevron.left",
@@ -273,7 +266,6 @@ private struct BreadcrumbBar: View {
                 .padding(.horizontal, 8)
             ScrollView(.horizontal, showsIndicators: false) {
                 HStack(spacing: 0) {
-                    let chain = session.chain
                     ForEach(Array(chain.enumerated()), id: \.element.id) { index, node in
                         if index > 0 {
                             Text(" / ")
@@ -296,7 +288,7 @@ private struct BreadcrumbBar: View {
             }
             .accessibilityElement(children: .contain)
             .accessibilityIdentifier("breadcrumb")
-            .accessibilityValue(session.chain.map(\.name).joined(separator: " / "))
+            .accessibilityValue(chain.map(\.name).joined(separator: " / "))
         }
         .padding(.leading, 8)
         .frame(height: 30)
@@ -330,7 +322,7 @@ private struct Footer: View {
     var filterFocused: FocusState<Bool>.Binding
 
     var body: some View {
-        @Bindable var session = session
+        @Bindable var bindableSession = session
         HStack(spacing: 12) {
             Text(session.footerText)
                 .font(.system(size: 11))
@@ -339,7 +331,7 @@ private struct Footer: View {
                 .truncationMode(.middle)
                 .frame(maxWidth: .infinity, alignment: .leading)
             Legend()
-            FilterField(text: $session.filter, focused: filterFocused)
+            FilterField(text: $bindableSession.filter, focused: filterFocused)
         }
         .padding(.horizontal, 10)
     }
@@ -377,6 +369,17 @@ private struct FilterField: View {
                 .font(.system(size: 12))
                 .foregroundStyle(Theme.text)
                 .focused(focused)
+            if !text.isEmpty {
+                Button {
+                    text = ""
+                } label: {
+                    Image(systemName: "xmark.circle.fill")
+                        .font(.system(size: 11))
+                        .foregroundStyle(Theme.secondary)
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Clear filter")
+            }
         }
         .padding(.horizontal, 8)
         .frame(width: 188, height: 24)
@@ -477,4 +480,3 @@ private struct MessageState: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 }
-

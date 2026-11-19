@@ -176,6 +176,38 @@ final class ScannerTests: XCTestCase {
         XCTAssertEqual(node.byteSize, expected)
         XCTAssertEqual(outcome.bytesCounted, expected)
         XCTAssertGreaterThan(outcome.filesSeen, 0)
+        XCTAssertEqual(node.fileCount(), outcome.filesSeen)
+    }
+
+    func testConsecutiveScansProduceUniqueNodeIDs() throws {
+        let root = try makeTree()
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let first = try XCTUnwrap(DirectoryScanner.scan(url: root, displayName: "first").root)
+        let second = try XCTUnwrap(DirectoryScanner.scan(url: root, displayName: "second").root)
+
+        func allIDs(_ node: FileNode) -> Set<UUID> {
+            var set: Set<UUID> = [node.id]
+            for child in node.children { set.formUnion(allIDs(child)) }
+            return set
+        }
+        XCTAssertTrue(allIDs(first).isDisjoint(with: allIDs(second)))
+    }
+
+    func testMissingAndNonDirectoryRootsReportExpectedFlags() throws {
+        let missing = FileManager.default.temporaryDirectory.appendingPathComponent("nonexistent-\(UUID().uuidString)")
+        let missingOutcome = DirectoryScanner.scan(url: missing, displayName: "missing")
+        XCTAssertTrue(missingOutcome.missing)
+        XCTAssertFalse(missingOutcome.rootDenied)
+        XCTAssertNil(missingOutcome.root)
+
+        let file = FileManager.default.temporaryDirectory.appendingPathComponent("file-\(UUID().uuidString).txt")
+        try Data("x".utf8).write(to: file)
+        defer { try? FileManager.default.removeItem(at: file) }
+        let fileOutcome = DirectoryScanner.scan(url: file, displayName: "file")
+        XCTAssertFalse(fileOutcome.missing)
+        XCTAssertTrue(fileOutcome.rootDenied)
+        XCTAssertNil(fileOutcome.root)
     }
 
     private func makeTree() throws -> URL {

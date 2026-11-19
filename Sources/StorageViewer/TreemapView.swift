@@ -66,6 +66,9 @@ struct TreemapView: View {
         .onAppear {
             if settled == nil { settled = folder }
         }
+        .onDisappear {
+            playback.stop()
+        }
         .onChange(of: folder.id) { _, _ in
             beginFlight(to: folder)
         }
@@ -154,7 +157,7 @@ struct TreemapView: View {
         } else {
             folders = [folder]
         }
-        let key = "\(revision)\t\(query)\t" + folders.map(\.id.uuidString).joined(separator: ",")
+        let key = HitKey(revision: revision, query: query, folderIDs: folders.map(\.id))
         return hitCache.lookup(key) {
             var ids = Set<UUID>()
             for item in folders {
@@ -198,21 +201,29 @@ struct TreemapView: View {
     private func blocks(_ nodes: [FileNode], owner: UUID, in canvas: CGRect) -> [PlacedBlock] {
         layouts.blocks(owner: owner, size: canvas.size, revision: revision) {
             let layout = TreemapLayout.layout(nodes: nodes, in: canvas)
-            let lookup = Dictionary(uniqueKeysWithValues: nodes.map { ($0.id, $0) })
-            return layout.compactMap { item in
-                guard let node = lookup[item.id] else { return nil }
+            var lookup: [UUID: FileNode] = [:]
+            lookup.reserveCapacity(nodes.count)
+            for node in nodes {
+                lookup[node.id] = node
+            }
+            var result: [PlacedBlock] = []
+            result.reserveCapacity(layout.count)
+            for item in layout {
+                guard let node = lookup[item.id] else { continue }
                 let tone = BlockTone(node: node)
                 let pad = padded(item.rect)
                 let prepared = pad.width > 16 && pad.height > 16 ? markDrawing(for: tone, in: pad) : nil
-                return PlacedBlock(
+                let measure = pad.width > 44 && pad.height > 14 ? LabelMeasure(node: node) : nil
+                result.append(PlacedBlock(
                     node: node,
                     rect: item.rect,
                     tone: tone,
-                    measure: LabelMeasure(node: node),
+                    measure: measure,
                     prepared: prepared,
                     preparedRect: pad
-                )
+                ))
             }
+            return result
         }
     }
 
@@ -228,11 +239,15 @@ struct TreemapView: View {
         for block in picture.children {
             fill(block, opacity: picture.childOpacity, bright: picture.bright, in: context)
         }
-        for block in picture.siblings where picture.siblingOpacity > 0.4 {
-            strokeAndLabel(block, opacity: picture.siblingOpacity, bright: picture.bright, in: context)
+        if picture.siblingOpacity > 0.4 {
+            for block in picture.siblings {
+                strokeAndLabel(block, opacity: picture.siblingOpacity, bright: picture.bright, in: context)
+            }
         }
-        for block in picture.children where picture.childOpacity > 0.72 {
-            strokeAndLabel(block, opacity: picture.childOpacity, bright: picture.bright, in: context)
+        if picture.childOpacity > 0.72 {
+            for block in picture.children {
+                strokeAndLabel(block, opacity: picture.childOpacity, bright: picture.bright, in: context)
+            }
         }
     }
 
@@ -242,14 +257,12 @@ struct TreemapView: View {
         let dimmed = dimmed(block.node, bright: bright)
         let strength = (dimmed ? 0.16 : 1) * opacity
         let path = Path(rect)
-        let tone = block.tone
-        context.drawLayer { layer in
-            layer.clip(to: path)
-            layer.fill(path, with: .color(Theme.color(for: block.node.category).opacity(strength)))
-            if !dimmed, rect.width > 16, rect.height > 16, opacity > 0.4 {
-                let mark = (tone.lightMark ? Color.white : Color.black).opacity(CGFloat(BlockPattern.markOpacity) * opacity)
-                paint(marks(for: block, in: rect), color: mark, into: &layer)
-            }
+        context.fill(path, with: .color(Theme.color(for: block.node.category).opacity(strength)))
+        if !dimmed, rect.width > 16, rect.height > 16, opacity > 0.4 {
+            var clipped = context
+            clipped.clip(to: path)
+            let mark = (block.tone.lightMark ? Color.white : Color.black).opacity(CGFloat(BlockPattern.markOpacity) * opacity)
+            paint(marks(for: block, in: rect), color: mark, into: &clipped)
         }
     }
 
@@ -273,25 +286,25 @@ struct TreemapView: View {
             )
         }
         guard !dimmed, rect.width > 44, rect.height > 14, opacity > 0.8 else { return }
-        context.drawLayer { layer in
-            layer.clip(to: Path(rect.insetBy(dx: 2, dy: 1)))
-            let ink = (selected ? Theme.onSelection : Theme.text).opacity(opacity)
-            let showsSize = rect.height > 28 && rect.width > 72
-            if let plate = labelPlate(in: rect, measure: block.measure, showsSize: showsSize) {
-                paintLabelBacking(selected: selected, plate: plate, opacity: opacity, on: &layer)
-            }
-            layer.draw(
-                Text(block.node.name).font(.system(size: 10, weight: .medium)).foregroundColor(ink),
-                at: CGPoint(x: rect.minX + 5, y: rect.minY + 9),
+        let measure = block.measure ?? LabelMeasure(node: block.node)
+        var clipped = context
+        clipped.clip(to: Path(rect.insetBy(dx: 2, dy: 1)))
+        let ink = (selected ? Theme.onSelection : Theme.text).opacity(opacity)
+        let showsSize = rect.height > 28 && rect.width > 72
+        if let plate = labelPlate(in: rect, measure: measure, showsSize: showsSize) {
+            paintLabelBacking(selected: selected, plate: plate, opacity: opacity, on: &clipped)
+        }
+        clipped.draw(
+            Text(block.node.name).font(.system(size: 10, weight: .medium)).foregroundColor(ink),
+            at: CGPoint(x: rect.minX + 5, y: rect.minY + 9),
+            anchor: .leading
+        )
+        if showsSize {
+            clipped.draw(
+                Text(measure.sizeText).font(.system(size: 10)).foregroundColor(ink.opacity(0.78)),
+                at: CGPoint(x: rect.minX + 5, y: rect.minY + 21),
                 anchor: .leading
             )
-            if showsSize {
-                layer.draw(
-                    Text(block.measure.sizeText).font(.system(size: 10)).foregroundColor(ink.opacity(0.78)),
-                    at: CGPoint(x: rect.minX + 5, y: rect.minY + 21),
-                    anchor: .leading
-                )
-            }
         }
     }
 
@@ -318,7 +331,7 @@ struct TreemapView: View {
 }
 
 /// Type color for one block, plus a mask taken from the name.
-/// The color hash is unchanged. The mask does not use the node id, so a rescan keeps it.
+/// The mask does not use the node id, so a rescan keeps it.
 private struct BlockTone {
     var grain: BlockGrain
     var lightMark: Bool
@@ -330,7 +343,6 @@ private struct BlockTone {
 }
 
 private struct MarkDrawing {
-    var arcs: [(path: Path, width: CGFloat)] = []
     var fills = Path()
     var strokes: [(width: CGFloat, path: Path)] = []
 }
@@ -339,13 +351,11 @@ private func markDrawing(for tone: BlockTone, in rect: CGRect) -> MarkDrawing {
     let primitives = tone.grain.pattern.primitives(in: rect, phaseX: tone.grain.phaseX, phaseY: tone.grain.phaseY)
     var drawing = MarkDrawing()
     var strokes: [CGFloat: Path] = [:]
+
     func addStroke(width: CGFloat, _ build: (inout Path) -> Void) {
-        var piece = Path()
-        build(&piece)
-        var combined = strokes[width] ?? Path()
-        combined.addPath(piece)
-        strokes[width] = combined
+        build(&strokes[width, default: Path()])
     }
+
     for primitive in primitives {
         switch primitive {
         case .fillEllipse(let rect):
@@ -368,32 +378,32 @@ private func markDrawing(for tone: BlockTone, in rect: CGRect) -> MarkDrawing {
                 if closed { path.closeSubpath() }
             }
         case .strokeArc(let center, let radius, let start, let end, let width):
-            var path = Path()
-            path.move(to: CGPoint(x: center.x + cos(start) * radius, y: center.y + sin(start) * radius))
-            path.addArc(
-                center: center,
-                radius: radius,
-                startAngle: .radians(start),
-                endAngle: .radians(end),
-                clockwise: false
-            )
-            drawing.arcs.append((path, width))
+            addStroke(width: width) { path in
+                path.move(to: CGPoint(x: center.x + cos(start) * radius, y: center.y + sin(start) * radius))
+                path.addArc(
+                    center: center,
+                    radius: radius,
+                    startAngle: .radians(start),
+                    endAngle: .radians(end),
+                    clockwise: false
+                )
+            }
         }
     }
     drawing.strokes = strokes.sorted { $0.key < $1.key }.map { ($0.key, $0.value) }
     return drawing
 }
 
-private func paint(_ drawing: MarkDrawing, color: Color, into layer: inout GraphicsContext) {
-    let style = { (width: CGFloat) in
-        StrokeStyle(lineWidth: width, lineCap: .round, lineJoin: .miter)
+private func paint(_ drawing: MarkDrawing, color: Color, into context: inout GraphicsContext) {
+    if !drawing.fills.isEmpty {
+        context.fill(drawing.fills, with: .color(color))
     }
-    for arc in drawing.arcs {
-        layer.stroke(arc.path, with: .color(color), style: style(arc.width))
-    }
-    layer.fill(drawing.fills, with: .color(color))
     for stroke in drawing.strokes {
-        layer.stroke(stroke.path, with: .color(color), style: style(stroke.width))
+        context.stroke(
+            stroke.path,
+            with: .color(color),
+            style: StrokeStyle(lineWidth: stroke.width, lineCap: .round, lineJoin: .miter)
+        )
     }
 }
 
@@ -404,30 +414,42 @@ private func marks(for block: PlacedBlock, in rect: CGRect) -> MarkDrawing {
     return markDrawing(for: block.tone, in: rect)
 }
 
-private final class ZoomPlayback: @unchecked Sendable {
-    private var timer: Timer?
+@MainActor
+private final class ZoomPlayback {
+    nonisolated(unsafe) private var timer: Timer?
     private let duration = 0.48
 
     func play(_ tick: @escaping @MainActor (CGFloat) -> Bool) {
-        timer?.invalidate()
+        stop()
         let start = CACurrentMediaTime()
+        let duration = duration
         let timer = Timer(timeInterval: 1.0 / 60.0, repeats: true) { [weak self] timer in
-            guard let self else {
-                timer.invalidate()
-                return
-            }
-            let raw = min(1, (CACurrentMediaTime() - start) / self.duration)
+            let raw = min(1, (CACurrentMediaTime() - start) / duration)
             let eased = 1 - pow(1 - raw, 3)
-            let keep = MainActor.assumeIsolated {
-                tick(CGFloat(eased))
+            let keep = MainActor.assumeIsolated { () -> Bool in
+                guard let self else { return false }
+                let shouldContinue = tick(CGFloat(eased))
+                if raw >= 1 || !shouldContinue {
+                    self.timer = nil
+                    return false
+                }
+                return true
             }
             if raw >= 1 || !keep {
                 timer.invalidate()
-                self.timer = nil
             }
         }
         self.timer = timer
         RunLoop.main.add(timer, forMode: .common)
+    }
+
+    func stop() {
+        timer?.invalidate()
+        timer = nil
+    }
+
+    deinit {
+        timer?.invalidate()
     }
 }
 
@@ -449,11 +471,17 @@ private enum ZoomMode {
     }
 }
 
+private struct HitKey: Equatable {
+    var revision: Int
+    var query: String
+    var folderIDs: [UUID]
+}
+
 private final class HitCache {
-    private var key = ""
+    private var key: HitKey?
     private var ids: Set<UUID> = []
 
-    func lookup(_ key: String, make: () -> Set<UUID>) -> Set<UUID> {
+    func lookup(_ key: HitKey, make: () -> Set<UUID>) -> Set<UUID> {
         if key == self.key { return ids }
         self.key = key
         ids = make()
@@ -461,15 +489,33 @@ private final class HitCache {
     }
 }
 
+private struct LayoutKey: Hashable {
+    var owner: UUID
+    var width: Int
+    var height: Int
+    var revision: Int
+}
+
 private final class LayoutMemo {
-    private var stored: [String: [PlacedBlock]] = [:]
+    private var stored: [LayoutKey: [PlacedBlock]] = [:]
+    private var order: [LayoutKey] = []
+    private let capacity = 8
 
     func blocks(owner: UUID, size: CGSize, revision: Int, make: () -> [PlacedBlock]) -> [PlacedBlock] {
-        let key = "\(revision)-\(owner.uuidString)-\(Int(size.width.rounded()))-\(Int(size.height.rounded()))"
+        let key = LayoutKey(
+            owner: owner,
+            width: Int(size.width.rounded()),
+            height: Int(size.height.rounded()),
+            revision: revision
+        )
         if let hit = stored[key] { return hit }
         let made = make()
-        if stored.count > 6 { stored.removeAll(keepingCapacity: true) }
+        if stored.count >= capacity, !order.isEmpty {
+            let evicted = order.removeFirst()
+            stored.removeValue(forKey: evicted)
+        }
         stored[key] = made
+        order.append(key)
         return made
     }
 }
@@ -478,13 +524,21 @@ private struct PlacedBlock {
     var node: FileNode
     var rect: CGRect
     var tone: BlockTone
-    var measure: LabelMeasure
+    var measure: LabelMeasure?
     /// Mask geometry for `preparedRect`. Unused while a zoom has moved `rect`.
     var prepared: MarkDrawing?
     var preparedRect: CGRect
 }
 
+@MainActor
 private struct LabelMeasure {
+    private static let nameAttributes: [NSAttributedString.Key: Any] = [
+        .font: NSFont.systemFont(ofSize: 10, weight: .medium)
+    ]
+    private static let sizeAttributes: [NSAttributedString.Key: Any] = [
+        .font: NSFont.systemFont(ofSize: 10)
+    ]
+
     var nameWidth: CGFloat
     var nameHeight: CGFloat
     var sizeWidth: CGFloat
@@ -492,13 +546,11 @@ private struct LabelMeasure {
     var sizeText: String
 
     init(node: FileNode) {
-        let nameFont = NSFont.systemFont(ofSize: 10, weight: .medium)
-        let nameBox = (node.name as NSString).size(withAttributes: [.font: nameFont])
+        let nameBox = (node.name as NSString).size(withAttributes: Self.nameAttributes)
         nameWidth = nameBox.width
         nameHeight = min(max(nameBox.height, 11), 16)
         sizeText = ByteFormat.bytes(node.byteSize)
-        let sizeFont = NSFont.systemFont(ofSize: 10)
-        let sizeBox = (sizeText as NSString).size(withAttributes: [.font: sizeFont])
+        let sizeBox = (sizeText as NSString).size(withAttributes: Self.sizeAttributes)
         sizeWidth = sizeBox.width
         sizeHeight = min(max(sizeBox.height, 11), 16)
     }
@@ -593,7 +645,7 @@ private func labelPlate(in rect: CGRect, measure: LabelMeasure, showsSize: Bool)
 
 /// Solid plate behind the words so the mask stops at the letters.
 /// Amber only when this block is the selection. The rest of the block keeps its mask.
-private func paintLabelBacking(selected: Bool, plate: CGRect, opacity: CGFloat, on layer: inout GraphicsContext) {
+private func paintLabelBacking(selected: Bool, plate: CGRect, opacity: CGFloat, on context: inout GraphicsContext) {
     let color = selected ? Theme.selection : Theme.labelInk
-    layer.fill(Path(plate), with: .color(color.opacity(opacity)))
+    context.fill(Path(plate), with: .color(color.opacity(opacity)))
 }

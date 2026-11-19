@@ -33,7 +33,7 @@ struct LayoutPicker: View {
         }
         .pickerStyle(.segmented)
         .labelsHidden()
-        .frame(width: 420)
+        .frame(width: 300)
         .accessibilityIdentifier("layout-picker")
         .accessibilityLabel("Layout")
         .accessibilityValue(layout.title)
@@ -47,10 +47,9 @@ struct CossArrangement<Map: View, List: View>: View {
     @ViewBuilder var map: () -> Map
     @ViewBuilder var list: () -> List
 
-    @State private var selectedNode: FileNode?
-
     var body: some View {
-        let facts = facts
+        let _ = session.treeRevision
+        let facts = makeFacts()
         Group {
             switch layout {
             case .foundation:
@@ -60,54 +59,42 @@ struct CossArrangement<Map: View, List: View>: View {
             case .ledger:
                 LedgerScreen(facts: facts, map: map, list: list)
             case .prompt:
-                PromptScreen(facts: facts, map: map)
+                PromptScreen(facts: facts, map: map) { node in
+                    if session.selection == node.id, node.isDirectory {
+                        session.zoom(node)
+                    } else {
+                        session.selectFromMap(node)
+                    }
+                }
             }
         }
         .accessibilityIdentifier("flat-layout")
         .accessibilityValue(layout.rawValue)
-        .onAppear(perform: resolveSelection)
-        .onChange(of: session.selection) { _, _ in resolveSelection() }
-        .onChange(of: session.treeRevision) { _, _ in resolveSelection() }
-        .onChange(of: session.root?.id) { _, _ in resolveSelection() }
-        .onChange(of: session.navigation.count) { _, _ in resolveSelection() }
     }
 
-    private var facts: CossFacts {
+    private func makeFacts() -> CossFacts {
         guard let current = session.current, let root = session.root else {
             return .empty
         }
         return CossFacts(
             current: current,
             root: root,
-            selected: selectedNode,
+            selected: session.selectedNode,
             skipped: session.skippedCount,
-            path: session.chain.map(\.name).joined(separator: " / ")
+            path: session.chain.map(\.name).joined(separator: " / "),
+            includeLines: layout == .prompt
         )
     }
+}
 
-    private func resolveSelection() {
-        guard let id = session.selection, let root = session.root else {
-            selectedNode = nil
-            return
-        }
-        if let current = session.current, let child = current.children.first(where: { $0.id == id }) {
-            selectedNode = child
-            return
-        }
-        if root.id == id {
-            selectedNode = root
-            return
-        }
-        selectedNode = Self.find(id, under: root)
-    }
+private struct PromptLine: Identifiable {
+    var node: FileNode
+    var size: String
+    var share: String
+    var hot: Bool
 
-    private static func find(_ id: UUID, under node: FileNode) -> FileNode? {
-        if node.id == id { return node }
-        for child in node.children {
-            if let found = find(id, under: child) { return found }
-        }
-        return nil
-    }
+    var id: UUID { node.id }
+    var name: String { node.name }
 }
 
 private struct CossFacts {
@@ -117,13 +104,14 @@ private struct CossFacts {
     var specs: [(label: String, value: String)]
     var counted: String
     var childCount: String
+    var itemsLabel: String
     var largest: String
     var skipped: String
     var caption: String
     var windowTitle: String
     var path: String
     var command: String
-    var lines: [(id: UUID, name: String, size: String, share: String, hot: Bool)]
+    var lines: [PromptLine]
 
     static let empty = CossFacts()
 
@@ -134,6 +122,7 @@ private struct CossFacts {
         specs = []
         counted = "—"
         childCount = "0"
+        itemsLabel = "0 items"
         largest = "—"
         skipped = "0"
         caption = ""
@@ -148,67 +137,57 @@ private struct CossFacts {
         root: FileNode,
         selected: FileNode?,
         skipped: Int,
-        path: String
+        path: String,
+        includeLines: Bool
     ) {
         let subject = selected ?? current
         let parentSize = subject.parent?.byteSize ?? subject.byteSize
         let share = ByteFormat.percent(subject.byteSize, of: parentSize)
-        let ranked = rankedChildren(current)
+        let children = current.children
+        let countText = ByteFormat.count(children.count)
+        let itemsText = children.count == 1 ? "1 item" : "\(countText) items"
+
         headline = ByteFormat.bytes(current.byteSize)
         if let selected, selected.id != current.id {
             let of = selected.parent?.name ?? current.name
             sentence = "\(selected.name) is \(ByteFormat.bytes(selected.byteSize)), \(share) of \(of)."
-            note = "\(kindName(selected.category)) in \(of)."
+            note = "\(selected.category.displayName) in \(of)."
         } else {
-            sentence = "\(current.children.count) items in \(current.name)."
+            sentence = "\(itemsText) in \(current.name)."
             note = "Folder size is the sum of the files inside."
         }
         specs = [
             ("Name", subject.name),
             ("Size", ByteFormat.bytes(subject.byteSize)),
             ("Share", share),
-            ("Kind", kindName(subject.category))
+            ("Kind", subject.category.displayName)
         ]
         counted = ByteFormat.bytes(root.byteSize)
-        childCount = "\(current.children.count)"
-        largest = ranked.first?.name ?? "—"
-        self.skipped = "\(skipped)"
+        childCount = countText
+        itemsLabel = itemsText
+        largest = children.first?.name ?? "—"
+        self.skipped = ByteFormat.count(skipped)
         caption = "\(subject.name)  ·  \(ByteFormat.bytes(subject.byteSize))  ·  \(share)"
         windowTitle = current.name
         self.path = path
         command = subject.name
-        let focus = ranked.firstIndex { $0.id == subject.id } ?? 0
-        let start = max(0, min(focus - 3, ranked.count - 8))
-        let window = ranked.dropFirst(start).prefix(8)
-        lines = window.map { node in
-            let parent = node.parent?.byteSize ?? current.byteSize
-            return (
-                node.id,
-                node.name,
-                ByteFormat.bytes(node.byteSize),
-                ByteFormat.percent(node.byteSize, of: parent),
-                node.id == subject.id && selected != nil
-            )
+
+        if includeLines {
+            let focus = children.firstIndex { $0.id == subject.id } ?? 0
+            let start = max(0, min(focus - 3, children.count - 8))
+            let window = children.dropFirst(start).prefix(8)
+            lines = window.map { node in
+                let parent = node.parent?.byteSize ?? current.byteSize
+                return PromptLine(
+                    node: node,
+                    size: ByteFormat.bytes(node.byteSize),
+                    share: ByteFormat.percent(node.byteSize, of: parent),
+                    hot: node.id == subject.id && selected != nil
+                )
+            }
+        } else {
+            lines = []
         }
-    }
-}
-
-private func kindName(_ category: FileCategory) -> String {
-    switch category {
-    case .code: "Code"
-    case .images: "Images"
-    case .video: "Video"
-    case .audio: "Audio"
-    case .archives: "Archives"
-    case .documents: "Documents"
-    case .other: "Other"
-    }
-}
-
-private func rankedChildren(_ folder: FileNode) -> [FileNode] {
-    folder.children.sorted { lhs, rhs in
-        if lhs.byteSize != rhs.byteSize { return lhs.byteSize > rhs.byteSize }
-        return lhs.name.localizedStandardCompare(rhs.name) == .orderedAscending
     }
 }
 
@@ -248,9 +227,16 @@ private struct SpecList: View {
 }
 
 private struct FoundationScreen<Map: View, List: View>: View {
+    private enum Pane {
+        case map
+        case log
+    }
+
     var facts: CossFacts
     @ViewBuilder var map: () -> Map
     @ViewBuilder var list: () -> List
+
+    @State private var pane: Pane = .map
 
     var body: some View {
         HStack(spacing: 0) {
@@ -283,10 +269,10 @@ private struct FoundationScreen<Map: View, List: View>: View {
 
             VStack(spacing: 0) {
                 HStack(spacing: 6) {
-                    chip("Map", raised: true)
-                    chip("Log", raised: false)
+                    chip("Map", selected: pane == .map) { pane = .map }
+                    chip("Log", selected: pane == .log) { pane = .log }
                     Spacer()
-                    Text("\(facts.childCount) items")
+                    Text(facts.itemsLabel)
                         .font(.system(size: 11, design: .monospaced))
                         .foregroundStyle(Theme.secondary)
                 }
@@ -294,13 +280,19 @@ private struct FoundationScreen<Map: View, List: View>: View {
                 .frame(height: 46)
                 Rectangle().fill(Theme.border).frame(height: 1)
                 HStack(spacing: 0) {
-                    map()
-                        .frame(maxWidth: .infinity, maxHeight: .infinity)
-                        .background(CossChrome.well)
-                    Rectangle().fill(Theme.border).frame(width: 1)
-                    list()
-                        .frame(width: 360)
-                        .background(Theme.panel)
+                    if pane == .map {
+                        map()
+                            .frame(maxWidth: .infinity, maxHeight: .infinity)
+                            .background(CossChrome.well)
+                        Rectangle().fill(Theme.border).frame(width: 1)
+                        list()
+                            .frame(width: 360)
+                            .background(Theme.panel)
+                    } else {
+                        list()
+                            .frame(maxWidth: .infinity, maxHeight: .infinity)
+                            .background(Theme.panel)
+                    }
                 }
             }
             .background(CossChrome.card)
@@ -315,14 +307,18 @@ private struct FoundationScreen<Map: View, List: View>: View {
         .accessibilityLabel("Foundation")
     }
 
-    private func chip(_ title: String, raised: Bool) -> some View {
-        Text(title)
-            .font(.system(size: 13, weight: raised ? .semibold : .regular))
-            .foregroundStyle(raised ? Theme.text : Theme.secondary)
-            .padding(.horizontal, 10)
-            .frame(height: 28)
-            .background(raised ? Theme.press : Color.clear)
-            .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+    private func chip(_ title: String, selected: Bool, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Text(title)
+                .font(.system(size: 13, weight: selected ? .semibold : .regular))
+                .foregroundStyle(selected ? Theme.text : Theme.secondary)
+                .padding(.horizontal, 10)
+                .frame(height: 28)
+                .background(selected ? Theme.press : Color.clear)
+                .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
     }
 }
 
@@ -346,7 +342,7 @@ private struct ProductsScreen<Map: View>: View {
                     Text(facts.counted)
                         .font(.system(size: 13, design: .monospaced))
                         .foregroundStyle(Theme.text)
-                    Text("\(facts.childCount) items")
+                    Text(facts.itemsLabel)
                         .font(.system(size: 12))
                         .foregroundStyle(Theme.secondary)
                 }
@@ -375,10 +371,10 @@ private struct LedgerScreen<Map: View, List: View>: View {
     var body: some View {
         VStack(spacing: 0) {
             HStack(spacing: 0) {
-                stat("Counted", facts.counted)
-                stat("Items", facts.childCount)
-                stat("Largest", facts.largest)
-                stat("Skipped", facts.skipped)
+                stat("Counted", facts.counted, leadingBorder: false)
+                stat("Items", facts.childCount, leadingBorder: true)
+                stat("Largest", facts.largest, leadingBorder: true)
+                stat("Skipped", facts.skipped, leadingBorder: true)
             }
             .background(CossChrome.card)
             Rectangle().fill(Theme.border).frame(height: 1)
@@ -406,7 +402,7 @@ private struct LedgerScreen<Map: View, List: View>: View {
         .accessibilityLabel("Ledger")
     }
 
-    private func stat(_ label: String, _ value: String) -> some View {
+    private func stat(_ label: String, _ value: String, leadingBorder: Bool) -> some View {
         VStack(alignment: .leading, spacing: 6) {
             Text(label.uppercased())
                 .font(.system(size: 11, weight: .semibold))
@@ -422,7 +418,7 @@ private struct LedgerScreen<Map: View, List: View>: View {
         .padding(.vertical, 16)
         .frame(maxWidth: .infinity, alignment: .leading)
         .overlay(alignment: .leading) {
-            if label != "Counted" {
+            if leadingBorder {
                 Rectangle().fill(Theme.border).frame(width: 1)
             }
         }
@@ -432,6 +428,7 @@ private struct LedgerScreen<Map: View, List: View>: View {
 private struct PromptScreen<Map: View>: View {
     var facts: CossFacts
     @ViewBuilder var map: () -> Map
+    var onActivateLine: (FileNode) -> Void
 
     var body: some View {
         HStack(alignment: .top, spacing: 18) {
@@ -482,22 +479,28 @@ private struct PromptScreen<Map: View>: View {
                         .font(.system(size: 12, design: .monospaced))
                         .foregroundStyle(Theme.secondary)
                         .lineLimit(1)
-                    ForEach(facts.lines, id: \.id) { line in
-                        HStack(spacing: 8) {
-                            Circle()
-                                .fill(line.hot ? Theme.selection : Theme.secondary.opacity(0.7))
-                                .frame(width: 6, height: 6)
-                            Text(line.name)
-                                .foregroundStyle(line.hot ? Theme.text : Theme.secondary)
-                                .lineLimit(1)
-                            Spacer(minLength: 8)
-                            Text(line.size)
-                                .foregroundStyle(line.hot ? Theme.text : Theme.secondary)
-                            Text(line.share)
-                                .foregroundStyle(Theme.secondary)
-                                .frame(width: 52, alignment: .trailing)
+                    ForEach(facts.lines) { line in
+                        Button {
+                            onActivateLine(line.node)
+                        } label: {
+                            HStack(spacing: 8) {
+                                Circle()
+                                    .fill(line.hot ? Theme.selection : Theme.secondary.opacity(0.7))
+                                    .frame(width: 6, height: 6)
+                                Text(line.name)
+                                    .foregroundStyle(line.hot ? Theme.text : Theme.secondary)
+                                    .lineLimit(1)
+                                Spacer(minLength: 8)
+                                Text(line.size)
+                                    .foregroundStyle(line.hot ? Theme.text : Theme.secondary)
+                                Text(line.share)
+                                    .foregroundStyle(Theme.secondary)
+                                    .frame(width: 52, alignment: .trailing)
+                            }
+                            .font(.system(size: 12, design: .monospaced))
+                            .contentShape(Rectangle())
                         }
-                        .font(.system(size: 12, design: .monospaced))
+                        .buttonStyle(.plain)
                     }
                 }
                 .padding(.horizontal, 16)
@@ -532,12 +535,10 @@ private struct PromptScreen<Map: View>: View {
     }
 
     private var promptRows: [(label: String, value: String)] {
-        var rows = [
+        [
             ("Items", facts.childCount),
             ("Counted", facts.counted)
-        ]
-        rows.append(contentsOf: facts.specs)
-        return rows
+        ] + facts.specs
     }
 
     private func light(_ color: Color) -> some View {

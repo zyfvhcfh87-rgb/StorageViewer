@@ -10,7 +10,7 @@ public struct FolderHistory<Location: Equatable> {
     public init() {}
 
     public var canGoBack: Bool { entries.indices.contains(index) && index > 0 }
-    public var canGoForward: Bool { index + 1 < entries.count }
+    public var canGoForward: Bool { entries.indices.contains(index) && index + 1 < entries.count }
 
     public var current: Location? {
         guard entries.indices.contains(index) else { return nil }
@@ -54,4 +54,36 @@ public struct FolderHistory<Location: Equatable> {
         index += 1
         return entries[index]
     }
+
+    /// Drops entries matching `shouldRemove` (e.g. after a folder is trashed),
+    /// keeping the current index valid and collapsing any newly-adjacent duplicates.
+    public mutating func removeAll(where shouldRemove: (Location) -> Bool) {
+        guard !entries.isEmpty else { return }
+        var kept: [Location] = []
+        kept.reserveCapacity(entries.count)
+        var newIndex = 0
+        var assignedIndex = false
+
+        for (i, entry) in entries.enumerated() {
+            if shouldRemove(entry) {
+                continue
+            }
+            if kept.last != entry {
+                kept.append(entry)
+            }
+            if i <= index {
+                newIndex = kept.count - 1
+                assignedIndex = true
+            }
+        }
+
+        entries = kept
+        if entries.isEmpty {
+            index = 0
+        } else {
+            index = assignedIndex ? newIndex : 0
+        }
+    }
 }
+
+extension FolderHistory: Sendable where Location: Sendable {}

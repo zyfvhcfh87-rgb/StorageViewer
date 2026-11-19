@@ -5,26 +5,24 @@ import XCTest
 
 final class TreeEditorTests: XCTestCase {
     func testRenameCopyPasteDuplicateAndTrashMatchTheDisk() throws {
-        let scratch = URL(fileURLWithPath: #filePath)
-            .deletingLastPathComponent()
-            .deletingLastPathComponent()
-            .deletingLastPathComponent()
-            .appendingPathComponent("ScratchOps")
-        if FileManager.default.fileExists(atPath: scratch.path) {
-            try FileManager.default.removeItem(at: scratch)
-        }
+        let scratch = FileManager.default.temporaryDirectory
+            .appendingPathComponent("StorageViewer-TreeEditor-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: scratch.appendingPathComponent("dest"), withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: scratch) }
+
         try Data(repeating: 1, count: 20).write(to: scratch.appendingPathComponent("alpha.txt"))
         try Data(repeating: 2, count: 10).write(to: scratch.appendingPathComponent("beta.txt"))
         try Data(repeating: 3, count: 5).write(to: scratch.appendingPathComponent("dest/inside.txt"))
 
         let outcome = DirectoryScanner.scan(url: scratch, displayName: "ScratchOps")
         let root = try XCTUnwrap(outcome.root)
-        root.linkParents()
 
         let alpha = try XCTUnwrap(root.children.first { $0.name == "alpha.txt" })
         XCTAssertThrowsError(try TreeEditor.rename(alpha, to: "   ", rootURL: scratch))
         XCTAssertThrowsError(try TreeEditor.rename(alpha, to: "bad/name", rootURL: scratch))
+        XCTAssertThrowsError(try TreeEditor.rename(alpha, to: ".", rootURL: scratch))
+        XCTAssertThrowsError(try TreeEditor.rename(alpha, to: "..", rootURL: scratch))
+        XCTAssertThrowsError(try TreeEditor.rename(alpha, to: "bad\0name", rootURL: scratch))
         XCTAssertTrue(FileManager.default.fileExists(atPath: scratch.appendingPathComponent("alpha.txt").path))
 
         try TreeEditor.rename(alpha, to: "renamed.txt", rootURL: scratch)
@@ -49,7 +47,10 @@ final class TreeEditorTests: XCTestCase {
         XCTAssertTrue(FileManager.default.fileExists(atPath: scratch.appendingPathComponent("beta copy.txt").path))
 
         let beforeTrash = root.byteSize
-        try TreeEditor.trash(twin, rootURL: scratch)
+        let trashedURL = try TreeEditor.trash(twin, rootURL: scratch)
+        defer {
+            if let trashedURL { try? FileManager.default.removeItem(at: trashedURL) }
+        }
         XCTAssertFalse(FileManager.default.fileExists(atPath: scratch.appendingPathComponent("beta copy.txt").path))
         XCTAssertNil(root.children.first { $0.name == "beta copy.txt" })
         XCTAssertEqual(root.byteSize, beforeTrash - 10)
@@ -58,12 +59,11 @@ final class TreeEditorTests: XCTestCase {
         XCTAssertEqual(try diskBytes(scratch), root.byteSize)
         XCTAssertEqual(Set(try names(scratch)), Set(root.children.map(\.name)))
         XCTAssertEqual(Set(try names(scratch.appendingPathComponent("dest"))), Set(dest.children.map(\.name)))
-
-        try restoreSample(scratch)
     }
 
     func testCaseOnlyRenameAndAReplacedFileIsLeftAlone() throws {
-        let scratch = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let scratch = FileManager.default.temporaryDirectory
+            .appendingPathComponent("StorageViewer-Case-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: scratch, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: scratch) }
         let report = scratch.appendingPathComponent("Report.pdf")
@@ -72,7 +72,6 @@ final class TreeEditorTests: XCTestCase {
 
         let outcome = DirectoryScanner.scan(url: scratch, displayName: "case")
         let root = try XCTUnwrap(outcome.root)
-        root.linkParents()
         let node = try XCTUnwrap(root.children.first { $0.name == "Report.pdf" })
         let other = try XCTUnwrap(root.children.first { $0.name == "other.txt" })
 
@@ -97,6 +96,87 @@ final class TreeEditorTests: XCTestCase {
         XCTAssertEqual(other.name, "other.txt")
     }
 
+    func testDuplicatingDirectoryProducesUniqueNodeIdentifiers() throws {
+        let scratch = FileManager.default.temporaryDirectory
+            .appendingPathComponent("StorageViewer-DupDir-\(UUID().uuidString)", isDirectory: true)
+        let folderURL = scratch.appendingPathComponent("album", isDirectory: true)
+        try FileManager.default.createDirectory(at: folderURL, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: scratch) }
+        try Data(repeating: 4, count: 120).write(to: folderURL.appendingPathComponent("cover.png"))
+
+        let outcome = DirectoryScanner.scan(url: scratch, displayName: "dup")
+        let root = try XCTUnwrap(outcome.root)
+        let album = try XCTUnwrap(root.children.first { $0.name == "album" })
+        let originalIDs = collectIDs(root)
+
+        let copy = try TreeEditor.duplicate(album, rootURL: scratch)
+        let copyIDs = collectIDs(copy)
+        XCTAssertEqual(copy.name, "album copy")
+        XCTAssertTrue(originalIDs.isDisjoint(with: copyIDs), "Copied directory must not reuse UUIDs from the original scan")
+        XCTAssertEqual(root.children.count, 2)
+        XCTAssertEqual(Set(root.children.map(\.id)).count, 2)
+        XCTAssertEqual(root.byteSize, 240)
+        XCTAssertEqual(root.fileCount(), 2)
+    }
+
+    func testRenameUpdatesCategoryMixAndRejectsHardLinkClobber() throws {
+        let scratch = FileManager.default.temporaryDirectory
+            .appendingPathComponent("StorageViewer-Cat-\(UUID().uuidString)", isDirectory: true)
+        let sub = scratch.appendingPathComponent("sub", isDirectory: true)
+        try FileManager.default.createDirectory(at: sub, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: scratch) }
+
+        let file = sub.appendingPathComponent("notes.txt")
+        let hardlink = sub.appendingPathComponent("alias.txt")
+        try Data(repeating: 1, count: 100).write(to: file)
+        XCTAssertEqual(link(file.path, hardlink.path), 0)
+
+        let root = try XCTUnwrap(DirectoryScanner.scan(url: scratch, displayName: "cat").root)
+        let subNode = try XCTUnwrap(root.children.first { $0.name == "sub" })
+        let notesNode = try XCTUnwrap(subNode.children.first { $0.name == "notes.txt" })
+        XCTAssertEqual(subNode.category, .documents)
+        XCTAssertEqual(root.category, .documents)
+
+        // Hard-linked sibling shares inode, but has a different name and must not be overwritten.
+        XCTAssertThrowsError(try TreeEditor.rename(notesNode, to: "alias.txt", rootURL: scratch))
+
+        // Renaming notes.txt -> main.swift flips category to .code; tie-breaking prefers .code over .documents.
+        try TreeEditor.rename(notesNode, to: "main.swift", rootURL: scratch)
+        XCTAssertEqual(notesNode.category, .code)
+        XCTAssertEqual(subNode.subtreeMix[.code], 100)
+        XCTAssertEqual(subNode.subtreeMix[.documents], 100)
+        XCTAssertEqual(subNode.category, .code)
+        XCTAssertEqual(root.category, .code)
+        XCTAssertEqual(root.byteSize, 200)
+    }
+
+    func testCopyAvoidsCollidingWithBrokenSymlink() throws {
+        let scratch = FileManager.default.temporaryDirectory
+            .appendingPathComponent("StorageViewer-BrokenLink-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: scratch, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: scratch) }
+
+        try Data("hello".utf8).write(to: scratch.appendingPathComponent("item.txt"))
+        try FileManager.default.createSymbolicLink(
+            atPath: scratch.appendingPathComponent("item copy.txt").path,
+            withDestinationPath: "/nonexistent/target/path"
+        )
+
+        let root = try XCTUnwrap(DirectoryScanner.scan(url: scratch, displayName: "broken").root)
+        let item = try XCTUnwrap(root.children.first { $0.name == "item.txt" })
+        let twin = try TreeEditor.duplicate(item, rootURL: scratch)
+        XCTAssertEqual(twin.name, "item copy 2.txt")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: scratch.appendingPathComponent("item copy 2.txt").path))
+    }
+
+    private func collectIDs(_ node: FileNode) -> Set<UUID> {
+        var ids: Set<UUID> = [node.id]
+        for child in node.children {
+            ids.formUnion(collectIDs(child))
+        }
+        return ids
+    }
+
     private func names(_ url: URL) throws -> [String] {
         try FileManager.default.contentsOfDirectory(atPath: url.path)
     }
@@ -115,14 +195,5 @@ final class TreeEditorTests: XCTestCase {
             }
         }
         return total
-    }
-
-    private func restoreSample(_ scratch: URL) throws {
-        if FileManager.default.fileExists(atPath: scratch.path) {
-            try FileManager.default.removeItem(at: scratch)
-        }
-        try FileManager.default.createDirectory(at: scratch.appendingPathComponent("notes"), withIntermediateDirectories: true)
-        try Data("Scratch folder for the item menu.\n".utf8).write(to: scratch.appendingPathComponent("readme.txt"))
-        try Data("Hello from notes.\n".utf8).write(to: scratch.appendingPathComponent("notes/hello.txt"))
     }
 }

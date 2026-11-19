@@ -54,6 +54,21 @@ final class BlockPatternTests: XCTestCase {
         }
     }
 
+    func testDegenerateRectsReturnEmpty() {
+        let badRects = [
+            CGRect.zero,
+            CGRect(x: 0, y: 0, width: -10, height: 20),
+            CGRect(x: 0, y: 0, width: 0.5, height: 0.5),
+            CGRect(x: 0, y: 0, width: CGFloat.nan, height: 20),
+            CGRect(x: 0, y: 0, width: CGFloat.infinity, height: 20)
+        ]
+        for rect in badRects {
+            for pattern in BlockPattern.allCases {
+                XCTAssertTrue(pattern.primitives(in: rect, phaseX: 0, phaseY: 0).isEmpty, pattern.label)
+            }
+        }
+    }
+
     private func intersects(_ mark: PatternPrimitive, _ rect: CGRect) -> Bool {
         rect.intersects(bounds(of: mark).insetBy(dx: -0.5, dy: -0.5))
     }

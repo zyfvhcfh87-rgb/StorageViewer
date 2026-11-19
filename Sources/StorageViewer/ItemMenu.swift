@@ -22,12 +22,14 @@ struct ItemMenu: View {
 struct RenameSheet: View {
     var original: String
     var onCancel: () -> Void
-    var onSave: (String) -> Void
+    /// Returns an error message if renaming failed, or nil on success.
+    var onSave: (String) -> String?
 
     @State private var name: String
+    @State private var submitError: String?
     @FocusState private var focused: Bool
 
-    init(original: String, onCancel: @escaping () -> Void, onSave: @escaping (String) -> Void) {
+    init(original: String, onCancel: @escaping () -> Void, onSave: @escaping (String) -> String?) {
         self.original = original
         self.onCancel = onCancel
         self.onSave = onSave
@@ -39,9 +41,11 @@ struct RenameSheet: View {
     }
 
     private var problem: String? {
-        if trimmed.isEmpty { return "The name can’t be empty." }
-        if trimmed.contains("/") { return "The name can’t contain /." }
-        return nil
+        TreeEditor.validateName(name)?.errorDescription
+    }
+
+    private var feedback: String? {
+        submitError ?? problem
     }
 
     var body: some View {
@@ -54,22 +58,25 @@ struct RenameSheet: View {
                 .font(.system(size: 13))
                 .foregroundStyle(Theme.text)
                 .focused($focused)
+                .onSubmit { submit() }
+                .onChange(of: name) { _, _ in submitError = nil }
                 .padding(.horizontal, 8)
                 .frame(height: 28)
                 .background(Theme.canvas)
                 .overlay(
                     RoundedRectangle(cornerRadius: 4)
-                        .strokeBorder(problem == nil ? Theme.border : Theme.accent, lineWidth: 1)
+                        .strokeBorder(feedback == nil ? Theme.border : Theme.accent, lineWidth: 1)
                 )
-            Text(problem ?? " ")
+            Text(feedback ?? " ")
                 .font(.system(size: 11))
-                .foregroundStyle(problem == nil ? .clear : Theme.secondary)
+                .foregroundStyle(feedback == nil ? .clear : Theme.secondary)
+                .lineLimit(2)
             HStack {
                 Spacer()
                 Button("Cancel", action: onCancel)
                     .buttonStyle(QuietButtonStyle())
                     .keyboardShortcut(.cancelAction)
-                Button("Rename") { onSave(trimmed) }
+                Button("Rename") { submit() }
                     .buttonStyle(QuietButtonStyle(prominent: true))
                     .keyboardShortcut(.defaultAction)
                     .disabled(problem != nil)
@@ -80,6 +87,11 @@ struct RenameSheet: View {
         .background(Theme.panel)
         .preferredColorScheme(.dark)
         .onAppear { focused = true }
+    }
+
+    private func submit() {
+        guard problem == nil else { return }
+        submitError = onSave(trimmed)
     }
 }
 
@@ -100,28 +112,49 @@ struct TreemapMenuCatcher: NSViewRepresentable {
     }
 }
 
-final class TreemapMenuView: NSView, @unchecked Sendable {
-    nonisolated(unsafe) var hit: ((CGPoint) -> FileNode?)?
-    nonisolated(unsafe) var makeMenu: ((FileNode) -> NSMenu)?
+final class TreemapMenuView: NSView {
+    var hit: ((CGPoint) -> FileNode?)?
+    var makeMenu: ((FileNode) -> NSMenu)?
     nonisolated(unsafe) private var monitor: Any?
 
     override func hitTest(_ point: NSPoint) -> NSView? { nil }
 
+    override func viewWillMove(toWindow newWindow: NSWindow?) {
+        super.viewWillMove(toWindow: newWindow)
+        if newWindow == nil {
+            removeMonitor()
+        }
+    }
+
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
-        if let monitor {
-            NSEvent.removeMonitor(monitor)
-            self.monitor = nil
-        }
+        removeMonitor()
         guard window != nil else { return }
-        monitor = NSEvent.addLocalMonitorForEvents(matching: .rightMouseDown) { [weak self] event in
-            guard let self, event.window === self.window else { return event }
+        monitor = NSEvent.addLocalMonitorForEvents(matching: [.rightMouseDown, .leftMouseDown]) { [weak self] event in
+            guard let self,
+                  event.window === self.window,
+                  !self.isHiddenOrHasHiddenAncestor,
+                  self.window?.attachedSheet == nil else {
+                return event
+            }
+            if event.type == .leftMouseDown {
+                let flags = event.modifierFlags.intersection([.control, .option, .command, .shift])
+                guard flags == .control else { return event }
+            }
             let local = self.convert(event.locationInWindow, from: nil)
             guard self.bounds.contains(local) else { return event }
-            let point = CGPoint(x: local.x, y: self.bounds.height - local.y)
+            let y = self.isFlipped ? local.y : self.bounds.height - local.y
+            let point = CGPoint(x: local.x, y: y)
             guard let node = self.hit?(point), let menu = self.makeMenu?(node) else { return event }
             NSMenu.popUpContextMenu(menu, with: event, for: self)
             return nil
+        }
+    }
+
+    private func removeMonitor() {
+        if let monitor {
+            NSEvent.removeMonitor(monitor)
+            self.monitor = nil
         }
     }
 
@@ -147,7 +180,8 @@ enum ItemActions {
         return menu
     }
 
-    private static func item(_ title: String, action: @escaping () -> Void) -> NSMenuItem {
+    @MainActor
+    private static func item(_ title: String, action: @escaping @MainActor () -> Void) -> NSMenuItem {
         let handler = MenuHandler(action)
         let item = NSMenuItem(title: title, action: #selector(MenuHandler.fire), keyEquivalent: "")
         item.target = handler
@@ -156,10 +190,11 @@ enum ItemActions {
     }
 }
 
-private final class MenuHandler: NSObject, @unchecked Sendable {
-    nonisolated(unsafe) private let handler: () -> Void
+@MainActor
+private final class MenuHandler: NSObject {
+    private let handler: @MainActor () -> Void
 
-    init(_ handler: @escaping () -> Void) {
+    init(_ handler: @escaping @MainActor () -> Void) {
         self.handler = handler
     }
 
