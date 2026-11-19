@@ -564,11 +564,6 @@ private final class ParallelScanner: @unchecked Sendable {
                 skipped += deferred.count
             }
         }
-
-        let resumePath = deferred.isEmpty ? nil : path(of: job.fd)
-        if !deferred.isEmpty, resumePath == nil {
-            skipped += deferred.count
-        }
         // Store before publishing: a resume worker can run the moment the job is queued
         // and attaches its children to this record.
         store(job, DirRecord(
@@ -838,6 +833,7 @@ private func listWithBulk(fd: Int32, buffer: UnsafeMutableRawPointer, capacity: 
     attributes.fileattr = attrgroup_t(UInt32(ATTR_FILE_DATALENGTH))
 
     var entries: [BulkEntry] = []
+    var sawAny = false
 
     while true {
         let count = getattrlistbulk(fd, &attributes, buffer, capacity, 0)
@@ -848,6 +844,7 @@ private func listWithBulk(fd: Int32, buffer: UnsafeMutableRawPointer, capacity: 
             if !sawAny, err == EACCES || err == EPERM { return .denied }
             return .fallback
         }
+        sawAny = true
         var offset = 0
         for _ in 0..<count {
             let base = buffer.advanced(by: offset)

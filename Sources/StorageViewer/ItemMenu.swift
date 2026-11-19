@@ -169,7 +169,7 @@ final class TreemapMenuView: NSView {
 @MainActor
 enum ItemActions {
     enum Entry {
-        case item(title: String, enabled: Bool, destructive: Bool, action: () -> Void)
+        case item(title: String, enabled: Bool, destructive: Bool, action: @MainActor () -> Void)
         case separator
     }
 

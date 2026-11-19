@@ -262,8 +262,10 @@ final class ScanSession {
     }
 
     func hover(_ node: FileNode?) {
+        let nextID = node?.id
+        guard hoveredID != nextID else { return }
         hoveredNode = node
-        hoveredID = node?.id
+        hoveredID = nextID
     }
 
     func canPaste(onto node: FileNode) -> Bool {
