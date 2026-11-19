@@ -21,6 +21,9 @@ struct StorageViewerApp: App {
             CommandGroup(replacing: .newItem) {
                 Button("Choose Folder…") { session.chooseFolder() }
                     .keyboardShortcut("o")
+                Button("Rescan") { session.rescan() }
+                    .keyboardShortcut("r")
+                    .disabled(session.rootURL == nil || session.phase == .scanning)
             }
             CommandMenu("Go") {
                 Button("Back") { session.goBack() }

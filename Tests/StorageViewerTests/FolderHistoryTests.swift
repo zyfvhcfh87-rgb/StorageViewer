@@ -52,4 +52,22 @@ final class FolderHistoryTests: XCTestCase {
         XCTAssertEqual(history.back(), "root")
         XCTAssertEqual(history.forward(), "alpha")
     }
+
+    func testRemoveAllPrunesDeletedEntriesAndCollapsesDuplicates() {
+        var history = FolderHistory<String>()
+        history.reset(to: "root")
+        history.push("dead")
+        history.push("root")
+        history.push("alive")
+        history.push("dead-forward")
+        XCTAssertEqual(history.back(), "alive")
+
+        history.removeAll { $0.hasPrefix("dead") }
+        XCTAssertEqual(history.current, "alive")
+        XCTAssertFalse(history.canGoForward)
+        XCTAssertTrue(history.canGoBack)
+        XCTAssertEqual(history.back(), "root")
+        XCTAssertFalse(history.canGoBack)
+        XCTAssertEqual(history.forward(), "alive")
+    }
 }

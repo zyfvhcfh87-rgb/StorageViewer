@@ -1,9 +1,10 @@
 import AppKit
 import Observation
+import os
 import StorageViewerCore
 import SwiftUI
 
-struct StartPoint: Identifiable, Equatable {
+struct StartPoint: Identifiable, Equatable, Sendable {
     var id: String
     var title: String
     var url: URL
@@ -19,9 +20,11 @@ final class ScanSession {
     var filesSeen = 0
     var bytesCounted: Int64 = 0
     var skippedCount = 0
-    var navigation: [UUID] = []
+    private(set) var navigation: [UUID] = []
+    private(set) var chain: [FileNode] = []
     var expanded: Set<UUID> = []
     var selection: UUID?
+    private(set) var selectedNode: FileNode?
     var hoveredID: UUID?
     var filter = ""
     var listScrollToken = 0
@@ -33,16 +36,19 @@ final class ScanSession {
     var treeError: String?
 
     private var readyFile: String?
+    private weak var hoveredNode: FileNode?
 
     var canGoBack: Bool { history.canGoBack }
     var canGoForward: Bool { history.canGoForward }
+    var canGoUp: Bool { chain.count > 1 }
+    var current: FileNode? { chain.last }
 
     private var history = FolderHistory<BrowsePlace>()
     private var generation = 0
     private var cancelFlag = CancellationFlag()
     private var didConsumeLaunch = false
 
-    enum Phase: Equatable {
+    enum Phase: String, Equatable {
         case empty
         case scanning
         case ready
@@ -55,28 +61,23 @@ final class ScanSession {
         startPoints = Self.makeStartPoints()
     }
 
-    var canGoUp: Bool { chain.count > 1 }
-
-    var chain: [FileNode] {
-        guard let root else { return [] }
-        var nodes = [root]
-        var current = root
-        for id in navigation.dropFirst() {
-            guard let next = current.children.first(where: { $0.id == id }) else { break }
-            nodes.append(next)
-            current = next
-        }
-        return nodes
-    }
-
-    var current: FileNode? { chain.last }
-
     var statusLine: String {
         var parts = ["\(ByteFormat.count(filesSeen)) files", ByteFormat.bytes(bytesCounted)]
         if skippedCount > 0 {
             parts.append("\(ByteFormat.count(skippedCount)) unreadable")
         }
         return parts.joined(separator: "  ·  ")
+    }
+
+    var footerText: String {
+        if let node = hoveredNode {
+            let kind = node.isDirectory ? "folder" : node.category.rawValue
+            return "\(node.name)  ·  \(ByteFormat.bytes(node.byteSize))  ·  \(kind)"
+        }
+        if let rootURL {
+            return rootURL.path
+        }
+        return "Logical size. Folders add up their contents."
     }
 
     func consumeLaunchArgumentsIfNeeded() {
@@ -114,23 +115,34 @@ final class ScanSession {
         generation += 1
         let generation = generation
         let displayName = Self.displayName(for: url)
+        let switchingFolder = rootURL?.standardizedFileURL != url.standardizedFileURL
 
         phase = .scanning
         root = nil
         rootURL = url
         rootTitle = displayName
-        navigation = []
+        setChain([])
         expanded = []
-        selection = nil
-        hoveredID = nil
-        hoveredNode = nil
+        setSelection(nil)
+        hover(nil)
         copiedNode = nil
         renameTarget = nil
+        treeError = nil
+        if switchingFolder {
+            filter = ""
+        }
         filesSeen = 0
         bytesCounted = 0
         skippedCount = 0
+        treeRevision += 1
         history.clear()
-        startPoints = Self.makeStartPoints()
+
+        Task {
+            let points = await Task.detached(priority: .utility) {
+                Self.makeStartPoints()
+            }.value
+            self.startPoints = points
+        }
 
         let pipe = ProgressPipe { [weak self] progress in
             guard let self, self.generation == generation else { return }
@@ -171,38 +183,36 @@ final class ScanSession {
     }
 
     func goUp() {
-        let nodes = chain
-        guard nodes.count > 1 else { return }
+        guard chain.count > 1 else { return }
         let previous = navigation
         withAnimation(Self.browse) {
-            if let leaving = nodes.last {
+            if let leaving = chain.last {
                 expanded.remove(leaving.id)
             }
-            navigation = nodes.dropLast().map(\.id)
-            selection = nil
-            hoveredID = nil
+            setChain(Array(chain.dropLast()))
+            setSelection(nil)
+            hover(nil)
             noteNavigation(from: previous)
         }
     }
 
     func reveal(index: Int) {
-        let nodes = chain
-        guard index >= 0, index < nodes.count else { return }
+        guard index >= 0, index < chain.count else { return }
         let previous = navigation
         withAnimation(Self.browse) {
-            for node in nodes.dropFirst(index + 1) {
+            for node in chain.dropFirst(index + 1) {
                 expanded.remove(node.id)
             }
-            navigation = nodes.prefix(index + 1).map(\.id)
-            selection = nil
-            hoveredID = nil
+            setChain(Array(chain.prefix(index + 1)))
+            setSelection(nil)
+            hover(nil)
             noteNavigation(from: previous)
         }
     }
 
     func zoom(_ node: FileNode) {
         guard node.isDirectory, !node.isMount else {
-            selectFromMap(node.id)
+            selectFromMap(node)
             return
         }
         let path = node.pathFromRoot()
@@ -211,10 +221,9 @@ final class ScanSession {
             for folder in path where folder.isDirectory {
                 expanded.insert(folder.id)
             }
-            navigation = path.map(\.id)
-            selection = node.id
-            hoveredID = nil
-            hoveredNode = nil
+            setChain(path)
+            setSelection(node)
+            hover(nil)
             listScrollToken += 1
             noteNavigation(from: previous)
         }
@@ -226,36 +235,35 @@ final class ScanSession {
         withAnimation(Self.browse) {
             if expanded.contains(node.id) {
                 expanded.remove(node.id)
-                if currentIsInside(node.id), let parent = node.parent {
-                    navigation = parent.pathFromRoot().map(\.id)
+                if chain.contains(where: { $0.id == node.id }), let parent = node.parent {
+                    setChain(parent.pathFromRoot())
                 }
             } else {
                 let path = node.pathFromRoot()
                 for folder in path where folder.isDirectory {
                     expanded.insert(folder.id)
                 }
-                navigation = path.map(\.id)
-                selection = node.id
+                setChain(path)
+                setSelection(node)
                 listScrollToken += 1
             }
-            hoveredID = nil
-            hoveredNode = nil
+            hover(nil)
             noteNavigation(from: previous)
         }
     }
 
-    func selectFromList(_ id: UUID) {
-        selection = id
+    func selectFromList(_ node: FileNode) {
+        setSelection(node)
     }
 
-    func selectFromMap(_ id: UUID) {
-        selection = id
+    func selectFromMap(_ node: FileNode) {
+        setSelection(node)
         listScrollToken += 1
     }
 
     func hover(_ node: FileNode?) {
-        hoveredID = node?.id
         hoveredNode = node
+        hoveredID = node?.id
     }
 
     func canPaste(onto node: FileNode) -> Bool {
@@ -284,41 +292,33 @@ final class ScanSession {
         renameTarget = node
     }
 
-    func commitRename(_ node: FileNode, to name: String) {
-        perform {
+    /// Renames `node` on disk and in the tree. Returns an error message on failure, or nil on success.
+    func commitRename(_ node: FileNode, to name: String) -> String? {
+        do {
             try TreeEditor.rename(node, to: name, rootURL: try requireRootURL())
-            refreshTree()
+            bumpTree(fileDelta: 0)
+            return nil
+        } catch {
+            return error.localizedDescription
         }
     }
 
     func paste(onto node: FileNode) {
         guard let copiedNode else { return }
-        copy {
-            try TreeEditor.preparePaste(copiedNode, onto: node, rootURL: try self.requireRootURL())
+        do {
+            let (folder, plan) = try TreeEditor.preparePaste(copiedNode, onto: node, rootURL: try requireRootURL())
+            runCopy(plan, into: folder)
+        } catch {
+            treeError = error.localizedDescription
         }
     }
 
     func duplicate(_ node: FileNode) {
-        copy {
-            try TreeEditor.prepareDuplicate(node, rootURL: try self.requireRootURL())
-        }
-    }
-
-    /// The copy and the scan of the result can take a while, so they run off the main actor.
-    private func copy(_ prepare: @escaping @MainActor () throws -> TreeEditor.CopyWork) {
-        let generation = generation
-        Task { @MainActor in
-            do {
-                let work = try prepare()
-                let created = try await Task.detached(priority: .userInitiated) {
-                    try TreeEditor.performCopy(work)
-                }.value
-                guard self.generation == generation else { return }
-                TreeEditor.attachCopy(created, to: work)
-                revealCreated(created)
-            } catch {
-                treeError = error.localizedDescription
-            }
+        do {
+            let (folder, plan) = try TreeEditor.prepareDuplicate(node, rootURL: try requireRootURL())
+            runCopy(plan, into: folder)
+        } catch {
+            treeError = error.localizedDescription
         }
     }
 
@@ -330,66 +330,73 @@ final class ScanSession {
         alert.addButton(withTitle: "Move to Trash")
         alert.addButton(withTitle: "Cancel")
         guard alert.runModal() == .alertFirstButtonReturn else { return }
+
         let zoomedInside = chain.contains { $0.id == node.id }
-        let fallback = node.parent?.pathFromRoot().map(\.id) ?? []
+        let fallback = node.parent?.pathFromRoot() ?? []
         let dropCopy = copiedNode.map { node.contains($0) } ?? false
+        let dropSelection = selectedNode.map { node.contains($0) } ?? (selection == node.id)
+        let dropHover = hoveredNode.map { node.contains($0) } ?? (hoveredID == node.id)
+        let dropRename = renameTarget.map { node.contains($0) } ?? false
+        let removedDirIDs = directoryIDs(in: node)
+        let removedFiles = node.fileCount()
         let previous = navigation
-        perform {
+
+        do {
             try TreeEditor.trash(node, rootURL: try requireRootURL())
             if dropCopy { copiedNode = nil }
-            if zoomedInside, let root {
-                navigation = fallback.isEmpty ? [root.id] : fallback
+            if dropSelection { setSelection(nil) }
+            if dropHover { hover(nil) }
+            if dropRename { renameTarget = nil }
+            expanded.subtract(removedDirIDs)
+            history.removeAll { place in
+                place.path.contains { removedDirIDs.contains($0) }
             }
-            expanded.remove(node.id)
-            if selection == node.id { selection = nil }
-            refreshTree()
-            noteNavigation(from: previous)
-        }
-    }
-
-    private func revealCreated(_ node: FileNode) {
-        if let parent = node.parent { expanded.insert(parent.id) }
-        selection = node.id
-        listScrollToken += 1
-        refreshTree()
-    }
-
-    private func refreshTree() {
-        guard let root else { return }
-        bytesCounted = root.byteSize
-        filesSeen = countFiles(root)
-        treeRevision += 1
-    }
-
-    private func countFiles(_ node: FileNode) -> Int {
-        if !node.isDirectory { return 1 }
-        return node.children.reduce(0) { $0 + countFiles($1) }
-    }
-
-    private func requireRootURL() throws -> URL {
-        guard let rootURL else { throw TreeEditError.missingItem }
-        return rootURL
-    }
-
-    private func perform(_ work: () throws -> Void) {
-        do {
-            try work()
+            if zoomedInside, let root {
+                setChain(fallback.isEmpty ? [root] : fallback)
+            }
+            bumpTree(fileDelta: -removedFiles)
+            if history.current?.path != navigation {
+                noteNavigation(from: previous)
+            }
         } catch {
             treeError = error.localizedDescription
         }
     }
 
-    private weak var hoveredNode: FileNode?
+    private func runCopy(_ plan: TreeEditor.CopyPlan, into folder: FileNode) {
+        let generation = generation
+        Task {
+            do {
+                let created = try await Task.detached(priority: .userInitiated) {
+                    try TreeEditor.executeCopy(plan)
+                }.value
+                guard self.generation == generation,
+                      let root = self.root,
+                      folder === root || folder.parent != nil else {
+                    return
+                }
+                TreeEditor.attachCopy(created, to: folder)
+                self.expanded.insert(folder.id)
+                self.setSelection(created)
+                self.listScrollToken += 1
+                self.bumpTree(fileDelta: created.fileCount())
+            } catch {
+                guard self.generation == generation else { return }
+                self.treeError = error.localizedDescription
+            }
+        }
+    }
 
-    var footerText: String {
-        if let node = hoveredNode {
-            let kind = node.isDirectory ? "folder" : node.category.rawValue
-            return "\(node.name)  ·  \(ByteFormat.bytes(node.byteSize))  ·  \(kind)"
-        }
-        if let rootURL {
-            return rootURL.path
-        }
-        return "Logical size. Folders add up their contents."
+    private func bumpTree(fileDelta: Int) {
+        guard let root else { return }
+        bytesCounted = root.byteSize
+        filesSeen = max(0, filesSeen + fileDelta)
+        treeRevision += 1
+    }
+
+    private func requireRootURL() throws -> URL {
+        guard let rootURL else { throw TreeEditError.missingItem }
+        return rootURL
     }
 
     private func apply(_ outcome: ScanOutcome) {
@@ -398,14 +405,14 @@ final class ScanSession {
         skippedCount = outcome.skippedCount
         root = outcome.root
         if let root {
-            navigation = [root.id]
+            setChain([root])
         } else {
-            navigation = []
+            setChain([])
         }
         expanded = []
-        selection = nil
-        hoveredID = nil
-        hoveredNode = nil
+        setSelection(nil)
+        hover(nil)
+        treeRevision += 1
         if root != nil {
             history.reset(to: place)
         } else {
@@ -425,20 +432,12 @@ final class ScanSession {
 
     private func writeReadyFile(_ outcome: ScanOutcome) {
         guard let readyFile else { return }
-        var lines: [String] = []
-        let phaseName: String
-        switch phase {
-        case .ready: phaseName = "ready"
-        case .cancelled: phaseName = "cancelled"
-        case .permissionDenied: phaseName = "permissionDenied"
-        case .missing: phaseName = "missing"
-        case .empty: phaseName = "empty"
-        case .scanning: phaseName = "scanning"
-        }
-        lines.append("phase\t\(phaseName)")
-        lines.append("files\t\(outcome.filesSeen)")
-        lines.append("bytes\t\(outcome.bytesCounted)")
-        lines.append("skipped\t\(outcome.skippedCount)")
+        var lines = [
+            "phase\t\(phase.rawValue)",
+            "files\t\(outcome.filesSeen)",
+            "bytes\t\(outcome.bytesCounted)",
+            "skipped\t\(outcome.skippedCount)"
+        ]
         if let root = outcome.root {
             lines.append("root\t\(root.byteSize)\t\(sanitized(root.name))")
             for child in root.children {
@@ -446,7 +445,7 @@ final class ScanSession {
                 lines.append("child\t\(child.byteSize)\t\(kind)\t\(child.category.rawValue)\t\(sanitized(child.name))")
             }
         }
-        let data = lines.joined(separator: "\n").appending("\n").data(using: .utf8)
+        let data = (lines.joined(separator: "\n") + "\n").data(using: .utf8)
         try? data?.write(to: URL(fileURLWithPath: readyFile), options: .atomic)
     }
 
@@ -460,29 +459,75 @@ final class ScanSession {
         BrowsePlace(path: navigation, expanded: expanded, selection: selection)
     }
 
+    private func setChain(_ nodes: [FileNode]) {
+        chain = nodes
+        navigation = nodes.map(\.id)
+    }
+
+    private func setSelection(_ node: FileNode?) {
+        selectedNode = node
+        selection = node?.id
+    }
+
     private func noteNavigation(from previous: [UUID]) {
         guard navigation != previous else { return }
         history.push(place)
     }
 
     private func show(_ place: BrowsePlace) {
+        let resolvedChain = resolveChain(for: place.path)
+        let resolvedSelection = resolveNode(id: place.selection, in: resolvedChain)
         withAnimation(Self.browse) {
-            navigation = place.path
+            setChain(resolvedChain)
             expanded = place.expanded
-            selection = place.selection
-            hoveredID = nil
-            hoveredNode = nil
+            setSelection(resolvedSelection)
+            hover(nil)
             listScrollToken += 1
         }
     }
 
-    private func currentIsInside(_ id: UUID) -> Bool {
-        var cursor = current
-        while let node = cursor {
-            if node.id == id { return true }
-            cursor = node.parent
+    private func resolveChain(for path: [UUID]) -> [FileNode] {
+        guard let root else { return [] }
+        var nodes = [root]
+        var cursor = root
+        for id in path.dropFirst() {
+            guard let next = cursor.children.first(where: { $0.id == id }) else { break }
+            nodes.append(next)
+            cursor = next
         }
-        return false
+        return nodes
+    }
+
+    private func resolveNode(id: UUID?, in chain: [FileNode]) -> FileNode? {
+        guard let id, let root else { return nil }
+        if let current = chain.last {
+            if current.id == id { return current }
+            if let child = current.children.first(where: { $0.id == id }) { return child }
+        }
+        if let onChain = chain.first(where: { $0.id == id }) { return onChain }
+        if root.id == id { return root }
+        var stack: [FileNode] = [root]
+        while let candidate = stack.popLast() {
+            if candidate.id == id { return candidate }
+            if candidate.isDirectory {
+                stack.append(contentsOf: candidate.children)
+            }
+        }
+        return nil
+    }
+
+    private func directoryIDs(in root: FileNode) -> Set<UUID> {
+        guard root.isDirectory else { return [] }
+        var ids: Set<UUID> = []
+        var stack: [FileNode] = [root]
+        while let node = stack.popLast() {
+            guard node.isDirectory else { continue }
+            ids.insert(node.id)
+            for child in node.children where child.isDirectory {
+                stack.append(child)
+            }
+        }
+        return ids
     }
 
     private func sanitized(_ name: String) -> String {
@@ -509,7 +554,7 @@ final class ScanSession {
         return (try? url.resourceValues(forKeys: [.volumeNameKey]).volumeName) ?? "Volume"
     }
 
-    private static func makeStartPoints() -> [StartPoint] {
+    private nonisolated static func makeStartPoints() -> [StartPoint] {
         var points = [
             StartPoint(
                 id: "home",
@@ -517,11 +562,14 @@ final class ScanSession {
                 url: FileManager.default.homeDirectoryForCurrentUser
             )
         ]
+        var seenPaths = Set<String>()
         let volumes = FileManager.default.mountedVolumeURLs(
             includingResourceValuesForKeys: [.volumeNameKey],
             options: [.skipHiddenVolumes]
         ) ?? []
         for volume in volumes {
+            let path = volume.standardizedFileURL.path
+            guard seenPaths.insert(path).inserted else { continue }
             let name = (try? volume.resourceValues(forKeys: [.volumeNameKey]).volumeName) ?? ""
             let title = name.isEmpty ? (volume.lastPathComponent.isEmpty ? "Volume" : volume.lastPathComponent) : name
             points.append(StartPoint(id: volume.path, title: title, url: volume))
@@ -530,34 +578,59 @@ final class ScanSession {
     }
 }
 
-private final class CancellationFlag: @unchecked Sendable {
-    private let lock = NSLock()
-    private var value = false
+private final class CancellationFlag: Sendable {
+    private let cancelled = OSAllocatedUnfairLock(initialState: false)
 
     func cancel() {
-        lock.lock()
-        value = true
-        lock.unlock()
+        cancelled.withLock { $0 = true }
     }
 
     var isCancelled: Bool {
-        lock.lock()
-        defer { lock.unlock() }
-        return value
+        cancelled.withLock { $0 }
     }
 }
 
-private final class ProgressPipe: @unchecked Sendable {
-    private let handler: @MainActor (ScanProgress) -> Void
+/// Coalesces progress snapshots from background workers so at most one MainActor
+/// delivery is scheduled at a time and updates always arrive in order.
+private final class ProgressPipe: Sendable {
+    private struct State {
+        var latest: ScanProgress?
+        var scheduled = false
+    }
 
-    init(handler: @escaping @MainActor (ScanProgress) -> Void) {
+    private let state = OSAllocatedUnfairLock(initialState: State())
+    private let handler: @MainActor @Sendable (ScanProgress) -> Void
+
+    init(handler: @escaping @MainActor @Sendable (ScanProgress) -> Void) {
         self.handler = handler
     }
 
     func send(_ progress: ScanProgress) {
-        let handler = handler
-        Task { @MainActor in
-            handler(progress)
+        let shouldSchedule = state.withLock { current -> Bool in
+            current.latest = progress
+            if current.scheduled { return false }
+            current.scheduled = true
+            return true
+        }
+        guard shouldSchedule else { return }
+        Task { @MainActor [self] in
+            self.drain()
+        }
+    }
+
+    @MainActor
+    private func drain() {
+        while true {
+            let next = state.withLock { current -> ScanProgress? in
+                if let value = current.latest {
+                    current.latest = nil
+                    return value
+                }
+                current.scheduled = false
+                return nil
+            }
+            guard let next else { return }
+            handler(next)
         }
     }
 }

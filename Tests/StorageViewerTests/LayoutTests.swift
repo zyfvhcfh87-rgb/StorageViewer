@@ -63,24 +63,64 @@ final class LayoutTests: XCTestCase {
         XCTAssertEqual(items[0].rect.height, bounds.height, accuracy: 0.001)
     }
 
+    func testTreemapHandlesLargeFoldersAndDegenerateBounds() {
+        XCTAssertTrue(TreemapLayout.layout(entries: [(UUID(), 10)], in: .zero).isEmpty)
+        XCTAssertTrue(TreemapLayout.layout(entries: [(UUID(), 10)], in: CGRect(x: 0, y: 0, width: -10, height: 10)).isEmpty)
+        XCTAssertTrue(TreemapLayout.layout(entries: [(UUID(), 10)], in: CGRect(x: 0, y: 0, width: CGFloat.nan, height: 10)).isEmpty)
+
+        let entries = (1...5_000).map { i in (UUID(), Int64(i * 17)) }
+        let bounds = CGRect(x: 0, y: 0, width: 1_200, height: 800)
+        let items = TreemapLayout.layout(entries: entries, in: bounds)
+        XCTAssertEqual(items.count, entries.count)
+        let covered = items.reduce(0.0) { $0 + Double($1.rect.width * $1.rect.height) }
+        XCTAssertEqual(covered, Double(bounds.width * bounds.height), accuracy: 1.0)
+        for item in items {
+            XCTAssertGreaterThanOrEqual(item.rect.minX, bounds.minX - 0.05)
+            XCTAssertGreaterThanOrEqual(item.rect.minY, bounds.minY - 0.05)
+            XCTAssertLessThanOrEqual(item.rect.maxX, bounds.maxX + 0.05)
+            XCTAssertLessThanOrEqual(item.rect.maxY, bounds.maxY + 0.05)
+        }
+    }
+
     func testByteFormatAndPercents() {
         XCTAssertEqual(ByteFormat.bytes(0), "0 B")
         XCTAssertEqual(ByteFormat.bytes(512), "512 B")
+        XCTAssertEqual(ByteFormat.bytes(1023), "1,023 B")
         XCTAssertEqual(ByteFormat.bytes(1024), "1.00 KB")
         XCTAssertEqual(ByteFormat.bytes(1536), "1.50 KB")
         XCTAssertEqual(ByteFormat.bytes(10 * 1024), "10.0 KB")
         XCTAssertEqual(ByteFormat.bytes(100 * 1024), "100 KB")
         XCTAssertEqual(ByteFormat.bytes(1024 * 1024), "1.00 MB")
+        XCTAssertEqual(ByteFormat.bytes(10_239), "10.0 KB")
+        XCTAssertEqual(ByteFormat.bytes(1_048_575), "1.00 MB")
+        XCTAssertEqual(ByteFormat.bytes(-1024), "-1.00 KB")
+        XCTAssertFalse(ByteFormat.bytes(Int64.min).isEmpty)
         XCTAssertEqual(ByteFormat.percent(0, of: 10), "0%")
         XCTAssertEqual(ByteFormat.percent(50, of: 100), "50.0%")
         XCTAssertEqual(ByteFormat.percent(1, of: 10_000), "<0.1%")
+        XCTAssertEqual(ByteFormat.count(0), "0")
         XCTAssertEqual(ByteFormat.count(8421), "8,421")
+        XCTAssertEqual(ByteFormat.count(1_234_567), "1,234,567")
+        XCTAssertEqual(ByteFormat.count(-4200), "-4,200")
+    }
+
+    func testByteFormatIsThreadSafe() {
+        DispatchQueue.concurrentPerform(iterations: 8) { worker in
+            for i in 0..<2_000 {
+                let bytes = ByteFormat.bytes(Int64((worker * 10_000 + i) * 7))
+                XCTAssertFalse(bytes.isEmpty)
+                let count = ByteFormat.count(worker * 10_000 + i)
+                XCTAssertFalse(count.isEmpty)
+            }
+        }
     }
 
     func testNameFilterAndCategories() {
         XCTAssertTrue(NameFilter.matches(name: "Photo.PNG", query: "photo"))
         XCTAssertTrue(NameFilter.matches(name: "Archive", query: "   "))
         XCTAssertFalse(NameFilter.matches(name: "Archive", query: "zip"))
+        XCTAssertTrue(NameFilter.matches(name: "Café-Notes.txt", query: "cafe"))
+        XCTAssertTrue(NameFilter.matches(name: "写真_01.png", query: "写真"))
         XCTAssertEqual(FileCategory.classify(name: "App.swift"), .code)
         XCTAssertEqual(FileCategory.classify(name: "shot.JPEG"), .images)
         XCTAssertEqual(FileCategory.classify(name: "clip.mov"), .video)
@@ -88,7 +128,10 @@ final class LayoutTests: XCTestCase {
         XCTAssertEqual(FileCategory.classify(name: "backup.zip"), .archives)
         XCTAssertEqual(FileCategory.classify(name: "notes.pdf"), .documents)
         XCTAssertEqual(FileCategory.classify(name: "Makefile"), .code)
+        XCTAssertEqual(FileCategory.classify(name: ".gitignore"), .code)
+        XCTAssertEqual(FileCategory.classify(name: ".editorconfig"), .code)
         XCTAssertEqual(FileCategory.classify(name: "blob.bin"), .other)
+        XCTAssertEqual(FileCategory.code.displayName, "Code")
     }
 
     func testFilterShowsAMatchInsideACollapsedFolder() {

@@ -28,6 +28,27 @@ public enum TreeEditError: LocalizedError, Equatable, Sendable {
 }
 
 public enum TreeEditor {
+    /// Immutable snapshot of a copy operation so disk I/O and directory rescanning
+    /// can execute safely off the main actor before attaching the result to the tree.
+    public struct CopyPlan: Sendable {
+        public let sourceURL: URL
+        public let sourceFileID: FileIdentity?
+        public let destinationDirectoryURL: URL
+        public let destinationDirectoryFileID: FileIdentity?
+        public let preferredName: String
+        public let isDirectory: Bool
+    }
+
+    public static func validateName(_ rawName: String) -> TreeEditError? {
+        let name = rawName.trimmingCharacters(in: .whitespacesAndNewlines)
+        if name.isEmpty { return .emptyName }
+        if name.contains("/") { return .slashInName }
+        if name == "." || name == ".." || name.contains("\0") {
+            return .failed("That name isn’t allowed.")
+        }
+        return nil
+    }
+
     public static func url(of node: FileNode, rootURL: URL) -> URL {
         var names: [String] = []
         var current: FileNode? = node
@@ -46,18 +67,22 @@ public enum TreeEditor {
     }
 
     public static func rename(_ node: FileNode, to rawName: String, rootURL: URL) throws {
+        if let error = validateName(rawName) { throw error }
         let name = rawName.trimmingCharacters(in: .whitespacesAndNewlines)
-        if name.isEmpty { throw TreeEditError.emptyName }
-        if name.contains("/") { throw TreeEditError.slashInName }
         guard let parent = node.parent else { throw TreeEditError.missingItem }
         if node.isMount { throw TreeEditError.mountPoint }
         if name == node.name { return }
 
-        let source = try requireSameFile(node, rootURL: rootURL)
+        let source = try requireSameFile(url: url(of: node, rootURL: rootURL), recordedID: node.fileID)
         let destination = parentURL(of: node, rootURL: rootURL).appendingPathComponent(name)
         var destInfo = stat()
-        if lstat(destination.path, &destInfo) == 0, FileIdentity(destInfo) != source.identity {
-            throw TreeEditError.failed("“\(name)” is already in this folder.")
+        if lstat(destination.path, &destInfo) == 0 {
+            let isCaseOnlyRename =
+                FileIdentity(destInfo) == source.identity &&
+                node.name.caseInsensitiveCompare(name) == .orderedSame
+            if !isCaseOnlyRename {
+                throw TreeEditError.failed("“\(name)” is already in this folder.")
+            }
         }
         do {
             try FileManager.default.moveItem(at: source.url, to: destination)
@@ -65,52 +90,28 @@ public enum TreeEditor {
             throw TreeEditError.failed((error as NSError).localizedDescription)
         }
 
-        let previous = node.subtreeMix
         node.name = name
         if !node.isDirectory {
-            node.category = FileCategory.classify(name: name)
-            node.subtreeMix = [node.category: node.byteSize]
-            var delta = node.subtreeMix
-            for (kind, bytes) in previous {
-                delta[kind, default: 0] -= bytes
+            let oldCategory = node.category
+            let newCategory = FileCategory.classify(name: name)
+            node.category = newCategory
+            if oldCategory != newCategory, node.byteSize > 0 {
+                var delta = CategoryTotals()
+                delta[oldCategory] = -node.byteSize
+                delta[newCategory] = node.byteSize
+                propagate(delta, byteDelta: 0, from: parent)
             }
-            propagate(delta, from: parent)
-        } else {
-            sort(parent)
         }
+        parent.sortChildren()
     }
 
-    @discardableResult
-    public static func duplicate(_ node: FileNode, rootURL: URL) throws -> FileNode {
-        let work = try prepareDuplicate(node, rootURL: rootURL)
-        return try finishCopy(work)
-    }
-
-    @discardableResult
-    public static func paste(_ copied: FileNode, onto target: FileNode, rootURL: URL) throws -> FileNode {
-        let work = try preparePaste(copied, onto: target, rootURL: rootURL)
-        return try finishCopy(work)
-    }
-
-    /// Disk work for one copy. `prepare` touches only the tree and cheap `stat` calls;
-    /// `performCopy` does the slow copy and scan and may run on any thread;
-    /// `attachCopy` puts the result into the tree and must run where the tree is owned.
-    public struct CopyWork: Sendable {
-        public var sourceURL: URL
-        public var directoryURL: URL
-        public var destinationURL: URL
-        public var name: String
-        public var isDirectory: Bool
-        public var folder: FileNode
-    }
-
-    public static func prepareDuplicate(_ node: FileNode, rootURL: URL) throws -> CopyWork {
+    public static func prepareDuplicate(_ node: FileNode, rootURL: URL) throws -> (folder: FileNode, plan: CopyPlan) {
         guard let parent = node.parent else { throw TreeEditError.missingItem }
         if node.isMount { throw TreeEditError.mountPoint }
-        return try makeCopyWork(of: node, in: parent, rootURL: rootURL)
+        return (parent, makeCopyPlan(of: node, into: parent, rootURL: rootURL))
     }
 
-    public static func preparePaste(_ copied: FileNode, onto target: FileNode, rootURL: URL) throws -> CopyWork {
+    public static func preparePaste(_ copied: FileNode, onto target: FileNode, rootURL: URL) throws -> (folder: FileNode, plan: CopyPlan) {
         guard copied.parent != nil, let destination = receiver(for: target) else {
             throw TreeEditError.missingItem
         }
@@ -118,81 +119,105 @@ public enum TreeEditor {
         if copied.isDirectory && copied.contains(destination) {
             throw TreeEditError.cannotPasteHere
         }
-        return try makeCopyWork(of: copied, in: destination, rootURL: rootURL)
+        return (destination, makeCopyPlan(of: copied, into: destination, rootURL: rootURL))
     }
 
-    /// Copies on disk and returns the new node, not yet linked into the tree.
-    public static func performCopy(_ work: CopyWork) throws -> FileNode {
+    /// Executes disk copy + scan for `plan` without touching any existing `FileNode`.
+    public static func executeCopy(_ plan: CopyPlan) throws -> FileNode {
+        let source = try requireSameFile(url: plan.sourceURL, recordedID: plan.sourceFileID)
+        // The scan root may be a symlink; the scanner recorded its target's identity.
+        _ = try requireSameFile(
+            url: plan.destinationDirectoryURL,
+            recordedID: plan.destinationDirectoryFileID,
+            followSymlink: true
+        )
+
+        let name = uniqueName(
+            in: plan.destinationDirectoryURL,
+            preferred: plan.preferredName,
+            isDirectory: plan.isDirectory
+        )
+        let destination = plan.destinationDirectoryURL.appendingPathComponent(name)
         do {
-            try FileManager.default.copyItem(at: work.sourceURL, to: work.destinationURL)
+            try FileManager.default.copyItem(at: source.url, to: destination)
         } catch {
             throw TreeEditError.failed((error as NSError).localizedDescription)
         }
 
-        if work.isDirectory {
-            let outcome = DirectoryScanner.scan(url: work.destinationURL, displayName: work.name)
+        if plan.isDirectory {
+            let outcome = DirectoryScanner.scan(url: destination, displayName: name)
             guard let scanned = outcome.root else {
-                try? FileManager.default.trashItem(at: work.destinationURL, resultingItemURL: nil)
+                try? FileManager.default.trashItem(at: destination, resultingItemURL: nil)
                 throw TreeEditError.failed("The copy was made, but macOS wouldn’t let StorageViewer read it.")
             }
             return scanned
         }
+
         var info = stat()
-        guard lstat(work.destinationURL.path, &info) == 0 else {
+        guard lstat(destination.path, &info) == 0 else {
             throw TreeEditError.failed("The copy was made, but its size couldn’t be read.")
         }
-        let file = FileNode(
-            name: work.name,
+        return FileNode(
+            name: name,
             isDirectory: false,
-            byteSize: Int64(info.st_size),
-            category: FileCategory.classify(name: work.name),
+            byteSize: max(0, Int64(info.st_size)),
+            category: FileCategory.classify(name: name),
             fileID: FileIdentity(info)
         )
-        file.subtreeMix = [file.category: file.byteSize]
-        return file
     }
 
-    public static func attachCopy(_ created: FileNode, to work: CopyWork) {
-        let folder = work.folder
+    public static func attachCopy(_ created: FileNode, to folder: FileNode) {
         folder.children.append(created)
         created.parent = folder
-        propagate(created.subtreeMix, from: folder)
+        propagate(created.effectiveTotals, byteDelta: created.byteSize, from: folder)
+        if created.byteSize == 0 {
+            folder.sortChildren()
+        }
     }
 
-    private static func finishCopy(_ work: CopyWork) throws -> FileNode {
-        let created = try performCopy(work)
-        attachCopy(created, to: work)
+    @discardableResult
+    public static func duplicate(_ node: FileNode, rootURL: URL) throws -> FileNode {
+        let (folder, plan) = try prepareDuplicate(node, rootURL: rootURL)
+        let created = try executeCopy(plan)
+        attachCopy(created, to: folder)
         return created
     }
 
-    public static func trash(_ node: FileNode, rootURL: URL) throws {
+    @discardableResult
+    public static func paste(_ copied: FileNode, onto target: FileNode, rootURL: URL) throws -> FileNode {
+        let (folder, plan) = try preparePaste(copied, onto: target, rootURL: rootURL)
+        let created = try executeCopy(plan)
+        attachCopy(created, to: folder)
+        return created
+    }
+
+    @discardableResult
+    public static func trash(_ node: FileNode, rootURL: URL) throws -> URL? {
         guard let parent = node.parent else { throw TreeEditError.missingItem }
         if node.isMount { throw TreeEditError.mountPoint }
-        let source = try requireSameFile(node, rootURL: rootURL)
+        let source = try requireSameFile(url: url(of: node, rootURL: rootURL), recordedID: node.fileID)
+        var resultingURL: NSURL?
         do {
-            try FileManager.default.trashItem(at: source.url, resultingItemURL: nil)
+            try FileManager.default.trashItem(at: source.url, resultingItemURL: &resultingURL)
         } catch {
             throw TreeEditError.failed((error as NSError).localizedDescription)
         }
-        let mix = node.subtreeMix
-        parent.children.removeAll { $0.id == node.id }
+        let totals = node.effectiveTotals
+        let removedBytes = node.byteSize
+        parent.children.removeAll { $0 === node || $0.id == node.id }
         node.parent = nil
-        var delta: [FileCategory: Int64] = [:]
-        for (kind, bytes) in mix { delta[kind] = -bytes }
-        propagate(delta, from: parent)
+        propagate(totals.negated(), byteDelta: -removedBytes, from: parent)
+        return resultingURL as URL?
     }
 
-    private static func makeCopyWork(of node: FileNode, in folder: FileNode, rootURL: URL) throws -> CopyWork {
-        let source = try requireSameFile(node, rootURL: rootURL)
-        let directory = url(of: folder, rootURL: rootURL)
-        let name = uniqueName(in: directory, preferred: node.name, isDirectory: node.isDirectory)
-        return CopyWork(
-            sourceURL: source.url,
-            directoryURL: directory,
-            destinationURL: directory.appendingPathComponent(name),
-            name: name,
-            isDirectory: node.isDirectory,
-            folder: folder
+    private static func makeCopyPlan(of node: FileNode, into folder: FileNode, rootURL: URL) -> CopyPlan {
+        CopyPlan(
+            sourceURL: url(of: node, rootURL: rootURL),
+            sourceFileID: node.fileID,
+            destinationDirectoryURL: url(of: folder, rootURL: rootURL),
+            destinationDirectoryFileID: folder.fileID,
+            preferredName: node.name,
+            isDirectory: node.isDirectory
         )
     }
 
@@ -202,14 +227,18 @@ public enum TreeEditor {
     }
 
     /// The path still has to be the file that was scanned.
-    private static func requireSameFile(_ node: FileNode, rootURL: URL) throws -> LocatedFile {
-        let source = url(of: node, rootURL: rootURL)
+    private static func requireSameFile(
+        url source: URL,
+        recordedID: FileIdentity?,
+        followSymlink: Bool = false
+    ) throws -> LocatedFile {
         var info = stat()
-        guard lstat(source.path, &info) == 0 else {
+        let status = followSymlink ? stat(source.path, &info) : lstat(source.path, &info)
+        guard status == 0 else {
             throw TreeEditError.failed("That item changed on disk. Scan again.")
         }
         let identity = FileIdentity(info)
-        if let recorded = node.fileID, recorded != identity {
+        if let recordedID, recordedID != identity {
             throw TreeEditError.failed("That item changed on disk. Scan again.")
         }
         return LocatedFile(url: source, identity: identity)
@@ -224,35 +253,23 @@ public enum TreeEditor {
         return url(of: parent, rootURL: rootURL)
     }
 
-    private static func propagate(_ delta: [FileCategory: Int64], from folder: FileNode) {
+    private static func propagate(_ delta: CategoryTotals, byteDelta: Int64, from folder: FileNode) {
         var current: FileNode? = folder
         while let node = current {
-            for (kind, bytes) in delta where bytes != 0 {
-                let next = (node.subtreeMix[kind] ?? 0) + bytes
-                if next <= 0 {
-                    node.subtreeMix.removeValue(forKey: kind)
-                } else {
-                    node.subtreeMix[kind] = next
-                }
-            }
             if node.isDirectory {
-                node.byteSize = node.children.reduce(0) { $0 + $1.byteSize }
-                node.category = FileNode.dominantCategory(node.subtreeMix)
-                sort(node)
+                node.applyCategoryDelta(delta)
+                node.category = node.categoryTotals.dominantCategory
+                if byteDelta != 0 {
+                    node.byteSize = max(0, saturatingAdd(node.byteSize, byteDelta))
+                    node.sortChildren()
+                }
             }
             current = node.parent
         }
     }
 
-    private static func sort(_ folder: FileNode) {
-        folder.children.sort { lhs, rhs in
-            if lhs.byteSize != rhs.byteSize { return lhs.byteSize > rhs.byteSize }
-            return lhs.name < rhs.name
-        }
-    }
-
-    private static func uniqueName(in directory: URL, preferred: String, isDirectory: Bool) -> String {
-        if !FileManager.default.fileExists(atPath: directory.appendingPathComponent(preferred).path) {
+    static func uniqueName(in directory: URL, preferred: String, isDirectory: Bool) -> String {
+        if !entryExists(atPath: directory.appendingPathComponent(preferred).path) {
             return preferred
         }
         let ext = (preferred as NSString).pathExtension
@@ -263,10 +280,16 @@ public enum TreeEditor {
         var number = 1
         while true {
             let candidate = joined(number == 1 ? "\(stem) copy" : "\(stem) copy \(number)")
-            if !FileManager.default.fileExists(atPath: directory.appendingPathComponent(candidate).path) {
+            if !entryExists(atPath: directory.appendingPathComponent(candidate).path) {
                 return candidate
             }
             number += 1
         }
+    }
+
+    /// Checks whether a directory entry exists without following symlinks (detects broken symlinks too).
+    private static func entryExists(atPath path: String) -> Bool {
+        var info = stat()
+        return lstat(path, &info) == 0
     }
 }

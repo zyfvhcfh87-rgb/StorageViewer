@@ -15,32 +15,24 @@ enum Theme {
     static let selection = Color(red: 0xe8 / 255, green: 0xa2 / 255, blue: 0x3a / 255)
     static let onSelection = Color(red: 0x14 / 255, green: 0x14 / 255, blue: 0x14 / 255)
 
-    static func components(for category: FileCategory) -> (CGFloat, CGFloat, CGFloat) {
-        switch category {
-        case .code:
-            return (0x3d / 255, 0x7a / 255, 0xe0 / 255)
-        case .images:
-            return (0x8b / 255, 0x5c / 255, 0xf6 / 255)
-        case .video:
-            return (0xe8 / 255, 0x5d / 255, 0x8c / 255)
-        case .audio:
-            return (0xe6 / 255, 0xc5 / 255, 0x3a / 255)
-        case .archives:
-            return (0x2f / 255, 0xbf / 255, 0x8a / 255)
-        case .documents:
-            return (0x3c / 255, 0xb8 / 255, 0xd9 / 255)
-        case .other:
-            return (0x8a / 255, 0x8a / 255, 0x8a / 255)
-        }
-    }
+    private static let codeColor = Color(red: 0x3d / 255, green: 0x7a / 255, blue: 0xe0 / 255)
+    private static let imagesColor = Color(red: 0x8b / 255, green: 0x5c / 255, blue: 0xf6 / 255)
+    private static let videoColor = Color(red: 0xe8 / 255, green: 0x5d / 255, blue: 0x8c / 255)
+    private static let audioColor = Color(red: 0xe6 / 255, green: 0xc5 / 255, blue: 0x3a / 255)
+    private static let archivesColor = Color(red: 0x2f / 255, green: 0xbf / 255, blue: 0x8a / 255)
+    private static let documentsColor = Color(red: 0x3c / 255, green: 0xb8 / 255, blue: 0xd9 / 255)
+    private static let otherColor = Color(red: 0x8a / 255, green: 0x8a / 255, blue: 0x8a / 255)
 
     static func color(for category: FileCategory) -> Color {
-        let parts = components(for: category)
-        return Color(red: parts.0, green: parts.1, blue: parts.2)
-    }
-
-    static func labelColor(for category: FileCategory) -> Color {
-        category == .other ? text.opacity(0.92) : labelInk.opacity(0.92)
+        switch category {
+        case .code: codeColor
+        case .images: imagesColor
+        case .video: videoColor
+        case .audio: audioColor
+        case .archives: archivesColor
+        case .documents: documentsColor
+        case .other: otherColor
+        }
     }
 }
 
@@ -66,23 +58,24 @@ struct QuietButtonStyle: ButtonStyle {
 
 struct WindowChrome: NSViewRepresentable {
     func makeNSView(context: Context) -> NSView {
-        let view = NSView()
-        DispatchQueue.main.async { style(view) }
-        return view
+        WindowChromeView()
     }
 
-    func updateNSView(_ nsView: NSView, context: Context) {
-        DispatchQueue.main.async { style(nsView) }
-    }
+    func updateNSView(_ nsView: NSView, context: Context) {}
+}
 
-    private func style(_ view: NSView) {
-        guard let window = view.window else { return }
+private final class WindowChromeView: NSView {
+    private static let darkBackground = NSColor(srgbRed: 0x0e / 255, green: 0x0e / 255, blue: 0x0e / 255, alpha: 1)
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        guard let window else { return }
         window.title = "StorageViewer"
         window.titleVisibility = .hidden
         window.titlebarAppearsTransparent = true
         window.styleMask.insert(.fullSizeContentView)
         window.isMovableByWindowBackground = true
         window.appearance = NSAppearance(named: .darkAqua)
-        window.backgroundColor = NSColor(srgbRed: 0x0e / 255, green: 0x0e / 255, blue: 0x0e / 255, alpha: 1)
+        window.backgroundColor = Self.darkBackground
     }
 }

@@ -15,18 +15,30 @@ public enum TreemapLayout {
     /// Squarified treemap. Rectangle area is proportional to `size`.
     /// Zero-size entries are omitted. The layout fills `bounds`.
     public static func layout(entries: [(id: UUID, size: Int64)], in bounds: CGRect) -> [TreemapItem] {
-        guard bounds.width > 0, bounds.height > 0 else { return [] }
-        let usable = entries.filter { $0.size > 0 }
-        guard !usable.isEmpty else { return [] }
-        let total = usable.reduce(Int64(0)) { $0 + $1.size }
-        guard total > 0 else { return [] }
-
-        let sorted = usable.sorted { lhs, rhs in
-            if lhs.size == rhs.size { return lhs.id.uuidString < rhs.id.uuidString }
-            return lhs.size > rhs.size
+        guard !bounds.isNull,
+              bounds.size.width > 0, bounds.size.height > 0,
+              bounds.origin.x.isFinite, bounds.origin.y.isFinite,
+              bounds.size.width.isFinite, bounds.size.height.isFinite else {
+            return []
         }
+
+        var usable: [(id: UUID, size: Int64)] = []
+        usable.reserveCapacity(entries.count)
+        var total = 0.0
+        for entry in entries where entry.size > 0 {
+            usable.append(entry)
+            total += Double(entry.size)
+        }
+        guard !usable.isEmpty, total > 0 else { return [] }
+
+        usable.sort { lhs, rhs in
+            if lhs.size != rhs.size { return lhs.size > rhs.size }
+            return uuidLessThan(lhs.id, rhs.id)
+        }
+
         let area = Double(bounds.width) * Double(bounds.height)
-        let weights = sorted.map { Double($0.size) / Double(total) * area }
+        let scale = area / total
+        let weights = usable.map { Double($0.size) * scale }
         let rects = squarify(
             weights,
             x: Double(bounds.minX),
@@ -34,12 +46,17 @@ public enum TreemapLayout {
             dx: Double(bounds.width),
             dy: Double(bounds.height)
         )
-        return zip(sorted, rects).map { entry, rect in
-            TreemapItem(
-                id: entry.id,
+
+        var items: [TreemapItem] = []
+        items.reserveCapacity(usable.count)
+        for index in 0..<min(usable.count, rects.count) {
+            let rect = rects[index]
+            items.append(TreemapItem(
+                id: usable[index].id,
                 rect: CGRect(x: rect.x, y: rect.y, width: max(0, rect.w), height: max(0, rect.h))
-            )
+            ))
         }
+        return items
     }
 
     public static func layout(nodes: [FileNode], in bounds: CGRect) -> [TreemapItem] {
@@ -53,103 +70,126 @@ public enum TreemapLayout {
         var h: Double
     }
 
-    private static func squarify(_ sizes: [Double], x: Double, y: Double, dx: Double, dy: Double) -> [RectD] {
+    /// O(N) Bruls-Huizing-van Wijk squarified layout with index slicing and O(1) aspect-ratio checks.
+    private static func squarify(_ weights: [Double], x: Double, y: Double, dx: Double, dy: Double) -> [RectD] {
+        let count = weights.count
         var result: [RectD] = []
+        result.reserveCapacity(count)
+
+        var start = 0
         var x = x
         var y = y
         var dx = dx
         var dy = dy
-        var start = 0
 
-        while start < sizes.count {
-            if sizes.count - start == 1 || dx <= 0.000_001 || dy <= 0.000_001 {
-                result.append(contentsOf: place(sizes[start...], x: x, y: y, dx: max(dx, 0), dy: max(dy, 0)))
+        while start < count {
+            let remainingCount = count - start
+            if remainingCount == 1 {
+                result.append(RectD(x: x, y: y, w: max(0, dx), h: max(0, dy)))
                 break
             }
-            var rowCount = 1
-            var sum = sizes[start]
-            var smallest = sizes[start]
-            var largest = sizes[start]
-            var best = worstRatio(sum: sum, smallest: smallest, largest: largest, dx: dx, dy: dy)
-            while start + rowCount < sizes.count {
-                let size = sizes[start + rowCount]
-                let nextSum = sum + size
-                let nextSmallest = min(smallest, size)
-                let nextLargest = max(largest, size)
-                let candidate = worstRatio(
-                    sum: nextSum,
-                    smallest: nextSmallest,
-                    largest: nextLargest,
-                    dx: dx,
-                    dy: dy
-                )
-                guard candidate <= best else { break }
-                best = candidate
-                sum = nextSum
-                smallest = nextSmallest
-                largest = nextLargest
-                rowCount += 1
+            if dx <= 0.000_001 || dy <= 0.000_001 {
+                var restSum = 0.0
+                for i in start..<count { restSum += weights[i] }
+                place(weights, start: start, count: remainingCount, sum: restSum, x: x, y: y, dx: max(dx, 0), dy: max(dy, 0), into: &result)
+                break
             }
-            let row = sizes[start..<(start + rowCount)]
-            result.append(contentsOf: place(row, x: x, y: y, dx: dx, dy: dy))
-            let rest = leftover(row, x: x, y: y, dx: dx, dy: dy)
-            x = rest.x
-            y = rest.y
-            dx = rest.w
-            dy = rest.h
+
+            let side = min(dx, dy)
+            let sideSq = side * side
+            let rowMax = weights[start]
+            var rowCount = 1
+            var rowSum = rowMax
+            var best = worstRatio(rowSum: rowSum, rowMax: rowMax, rowMin: rowMax, sideSq: sideSq)
+
+            while start + rowCount < count {
+                let nextVal = weights[start + rowCount]
+                let nextSum = rowSum + nextVal
+                let candidate = worstRatio(rowSum: nextSum, rowMax: rowMax, rowMin: nextVal, sideSq: sideSq)
+                if candidate <= best {
+                    best = candidate
+                    rowSum = nextSum
+                    rowCount += 1
+                } else {
+                    break
+                }
+            }
+
+            place(weights, start: start, count: rowCount, sum: rowSum, x: x, y: y, dx: dx, dy: dy, into: &result)
+
+            if dx >= dy {
+                let width = min(dx, dy > 0 ? rowSum / dy : 0)
+                x += width
+                dx = max(0, dx - width)
+            } else {
+                let height = min(dy, dx > 0 ? rowSum / dx : 0)
+                y += height
+                dy = max(0, dy - height)
+            }
             start += rowCount
         }
         return result
     }
 
-    /// Worst width-to-height ratio of a row, without placing it.
-    /// The row runs along the longer edge, so every rect shares one side length:
-    /// `sum / shorterEdge`. Ratio `i` is `max(edge² / sizeᵢ, sizeᵢ / edge²)`.
-    private static func worstRatio(
+    /// For descending weights in a strip along `side`, the worst aspect ratio is always
+    /// attained by either the largest (`rowMax`) or smallest (`rowMin`) item in the strip.
+    private static func worstRatio(rowSum: Double, rowMax: Double, rowMin: Double, sideSq: Double) -> Double {
+        guard rowMin > 0, rowSum > 0, sideSq > 0 else { return .infinity }
+        let sumSq = rowSum * rowSum
+        return max((sideSq * rowMax) / sumSq, sumSq / (sideSq * rowMin))
+    }
+
+    private static func place(
+        _ weights: [Double],
+        start: Int,
+        count: Int,
         sum: Double,
-        smallest: Double,
-        largest: Double,
+        x: Double,
+        y: Double,
         dx: Double,
-        dy: Double
-    ) -> Double {
-        guard sum > 0, smallest > 0, dx > 0, dy > 0 else { return .infinity }
-        let edge = dx >= dy ? sum / dy : sum / dx
-        let squared = edge * edge
-        return max(squared / smallest, largest / squared)
-    }
-
-    private static func place(_ sizes: ArraySlice<Double>, x: Double, y: Double, dx: Double, dy: Double) -> [RectD] {
-        let sum = sizes.reduce(0, +)
-        guard sum > 0, dx > 0, dy > 0 else { return [] }
-        if dx >= dy {
-            let width = sum / dy
-            var rects: [RectD] = []
-            var cursorY = y
-            for size in sizes {
-                let height = width > 0 ? size / width : 0
-                rects.append(RectD(x: x, y: cursorY, w: width, h: height))
-                cursorY += height
+        dy: Double,
+        into result: inout [RectD]
+    ) {
+        guard sum > 0, dx > 0, dy > 0 else {
+            for _ in 0..<count {
+                result.append(RectD(x: x, y: y, w: 0, h: 0))
             }
-            return rects
+            return
         }
-        let height = sum / dx
-        var rects: [RectD] = []
-        var cursorX = x
-        for size in sizes {
-            let width = height > 0 ? size / height : 0
-            rects.append(RectD(x: cursorX, y: y, w: width, h: height))
-            cursorX += width
+        if dx >= dy {
+            let width = min(dx, sum / dy)
+            let invWidth = width > 0 ? (dy / sum) : 0
+            var cursorY = y
+            let maxY = y + dy
+            for i in start..<(start + count) {
+                let height = min(maxY - cursorY, weights[i] * invWidth)
+                result.append(RectD(x: x, y: cursorY, w: width, h: max(0, height)))
+                cursorY += max(0, height)
+            }
+        } else {
+            let height = min(dy, sum / dx)
+            let invHeight = height > 0 ? (dx / sum) : 0
+            var cursorX = x
+            let maxX = x + dx
+            for i in start..<(start + count) {
+                let width = min(maxX - cursorX, weights[i] * invHeight)
+                result.append(RectD(x: cursorX, y: y, w: max(0, width), h: height))
+                cursorX += max(0, width)
+            }
         }
-        return rects
     }
 
-    private static func leftover(_ sizes: ArraySlice<Double>, x: Double, y: Double, dx: Double, dy: Double) -> RectD {
-        let sum = sizes.reduce(0, +)
-        if dx >= dy {
-            let width = dy > 0 ? sum / dy : 0
-            return RectD(x: x + width, y: y, w: dx - width, h: dy)
+    /// Byte-order comparison matching `uuidString` lexicographical order without allocating Strings.
+    private static func uuidLessThan(_ lhs: UUID, _ rhs: UUID) -> Bool {
+        withUnsafeBytes(of: lhs.uuid) { lBytes in
+            withUnsafeBytes(of: rhs.uuid) { rBytes in
+                for i in 0..<16 {
+                    let a = lBytes[i]
+                    let b = rBytes[i]
+                    if a != b { return a < b }
+                }
+                return false
+            }
         }
-        let height = dx > 0 ? sum / dx : 0
-        return RectD(x: x, y: y + height, w: dx, h: dy - height)
     }
 }

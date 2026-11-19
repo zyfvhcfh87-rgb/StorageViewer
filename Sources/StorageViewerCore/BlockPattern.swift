@@ -45,47 +45,56 @@ public enum BlockPattern: Int, CaseIterable, Sendable {
     public static let markOpacity: Double = 0.36
 
     public func primitives(in rect: CGRect, phaseX: CGFloat, phaseY: CGFloat) -> [PatternPrimitive] {
+        guard !rect.isNull,
+              rect.size.width > 1, rect.size.height > 1,
+              rect.origin.x.isFinite, rect.origin.y.isFinite,
+              rect.size.width.isFinite, rect.size.height.isFinite,
+              phaseX.isFinite, phaseY.isFinite else {
+            return []
+        }
+
         switch self {
         case .dots:
-            return cells(in: rect, stepX: 8, stepY: 8, phaseX: phaseX, phaseY: phaseY) { center in
-                [disk(center, diameter: 2.4)]
+            return buildCells(in: rect, stepX: 8, stepY: 8, phaseX: phaseX, phaseY: phaseY) { center, out in
+                out.append(disk(center, diameter: 2.4))
             }
         case .obliqueDashes:
-            return cells(in: rect, stepX: 11, stepY: 11, phaseX: phaseX, phaseY: phaseY) { center in
-                [dash(center, dx: 3.1, dy: 3.1)]
+            return buildCells(in: rect, stepX: 11, stepY: 11, phaseX: phaseX, phaseY: phaseY) { center, out in
+                out.append(dash(center, dx: 3.1, dy: 3.1))
             }
         case .horizontalDashes:
-            return cells(in: rect, stepX: 11, stepY: 7.5, phaseX: phaseX, phaseY: phaseY) { center in
-                [dash(center, dx: 3.3, dy: 0)]
+            return buildCells(in: rect, stepX: 11, stepY: 7.5, phaseX: phaseX, phaseY: phaseY) { center, out in
+                out.append(dash(center, dx: 3.3, dy: 0))
             }
         case .verticalDashes:
-            return cells(in: rect, stepX: 7.5, stepY: 11, phaseX: phaseX, phaseY: phaseY) { center in
-                [dash(center, dx: 0, dy: 3.3)]
+            return buildCells(in: rect, stepX: 7.5, stepY: 11, phaseX: phaseX, phaseY: phaseY) { center, out in
+                out.append(dash(center, dx: 0, dy: 3.3))
             }
         case .waves:
             return waveMarks(in: rect, phaseX: phaseX, phaseY: phaseY)
         case .squares:
-            return cells(in: rect, stepX: 10, stepY: 10, phaseX: phaseX, phaseY: phaseY) { center in
+            return buildCells(in: rect, stepX: 10, stepY: 10, phaseX: phaseX, phaseY: phaseY) { center, out in
                 let side: CGFloat = 5.4
-                return [.strokeRect(
+                out.append(.strokeRect(
                     CGRect(x: center.x - side / 2, y: center.y - side / 2, width: side, height: side),
                     width: 1.1
-                )]
+                ))
             }
         case .bubbles:
-            return cells(in: rect, stepX: 14, stepY: 14, phaseX: phaseX, phaseY: phaseY) { center in
-                [ring(center, diameter: 8.2, width: 1.15)]
+            return buildCells(in: rect, stepX: 14, stepY: 14, phaseX: phaseX, phaseY: phaseY) { center, out in
+                out.append(ring(center, diameter: 8.2, width: 1.15))
             }
         case .crosshatch:
             return crosshatchMarks(in: rect, phaseX: phaseX, phaseY: phaseY)
         case .rings:
-            return cells(in: rect, stepX: 13, stepY: 13, phaseX: phaseX, phaseY: phaseY) { center in
-                [ring(center, diameter: 7.2, width: 1.05), ring(center, diameter: 2.8, width: 0.95)]
+            return buildCells(in: rect, stepX: 13, stepY: 13, phaseX: phaseX, phaseY: phaseY, perCell: 2) { center, out in
+                out.append(ring(center, diameter: 7.2, width: 1.05))
+                out.append(ring(center, diameter: 2.8, width: 0.95))
             }
         case .diagonalGrid:
-            return cells(in: rect, stepX: 13, stepY: 13, phaseX: phaseX, phaseY: phaseY) { center in
+            return buildCells(in: rect, stepX: 13, stepY: 13, phaseX: phaseX, phaseY: phaseY) { center, out in
                 let reach: CGFloat = 3.7
-                return [.stroke(
+                out.append(.stroke(
                     points: [
                         CGPoint(x: center.x, y: center.y - reach),
                         CGPoint(x: center.x + reach, y: center.y),
@@ -94,14 +103,14 @@ public enum BlockPattern: Int, CaseIterable, Sendable {
                     ],
                     width: 1.1,
                     closed: true
-                )]
+                ))
             }
         case .stipple:
             return stippleMarks(in: rect, phaseX: phaseX, phaseY: phaseY)
         case .chevrons:
-            return cells(in: rect, stepX: 11, stepY: 11, phaseX: phaseX, phaseY: phaseY) { center in
+            return buildCells(in: rect, stepX: 11, stepY: 11, phaseX: phaseX, phaseY: phaseY) { center, out in
                 let arm: CGFloat = 3.3
-                return [.stroke(
+                out.append(.stroke(
                     points: [
                         CGPoint(x: center.x - arm * 0.45, y: center.y - arm),
                         CGPoint(x: center.x + arm * 0.72, y: center.y),
@@ -109,12 +118,12 @@ public enum BlockPattern: Int, CaseIterable, Sendable {
                     ],
                     width: 1.2,
                     closed: false
-                )]
+                ))
             }
         case .triangles:
-            return cells(in: rect, stepX: 12, stepY: 12, phaseX: phaseX, phaseY: phaseY) { center in
+            return buildCells(in: rect, stepX: 12, stepY: 12, phaseX: phaseX, phaseY: phaseY) { center, out in
                 let height: CGFloat = 4.2
-                return [.stroke(
+                out.append(.stroke(
                     points: [
                         CGPoint(x: center.x, y: center.y - height * 0.72),
                         CGPoint(x: center.x + height * 0.9, y: center.y + height * 0.58),
@@ -122,19 +131,17 @@ public enum BlockPattern: Int, CaseIterable, Sendable {
                     ],
                     width: 1.1,
                     closed: true
-                )]
+                ))
             }
         case .plusSigns:
-            return cells(in: rect, stepX: 11, stepY: 11, phaseX: phaseX, phaseY: phaseY) { center in
+            return buildCells(in: rect, stepX: 11, stepY: 11, phaseX: phaseX, phaseY: phaseY, perCell: 2) { center, out in
                 let arm: CGFloat = 2.8
-                return [
-                    dash(center, dx: arm, dy: 0),
-                    dash(center, dx: 0, dy: arm)
-                ]
+                out.append(dash(center, dx: arm, dy: 0))
+                out.append(dash(center, dx: 0, dy: arm))
             }
         case .brokenRings:
-            return cells(in: rect, stepX: 12, stepY: 12, phaseX: phaseX, phaseY: phaseY) { center in
-                [.strokeArc(center: center, radius: 3.4, start: .pi * 0.35, end: .pi * 1.7, width: 1.2)]
+            return buildCells(in: rect, stepX: 12, stepY: 12, phaseX: phaseX, phaseY: phaseY) { center, out in
+                out.append(.strokeArc(center: center, radius: 3.4, start: .pi * 0.35, end: .pi * 1.7, width: 1.2))
             }
         }
     }
@@ -209,41 +216,50 @@ private func dash(_ center: CGPoint, dx: CGFloat, dy: CGFloat) -> PatternPrimiti
     )
 }
 
-private func cells(
+private func buildCells(
     in rect: CGRect,
     stepX: CGFloat,
     stepY: CGFloat,
     phaseX: CGFloat,
     phaseY: CGFloat,
-    mark: (CGPoint) -> [PatternPrimitive]
+    perCell: Int = 1,
+    emit: (CGPoint, inout [PatternPrimitive]) -> Void
 ) -> [PatternPrimitive] {
-    origins(in: rect, stepX: stepX, stepY: stepY, phaseX: phaseX, phaseY: phaseY).flatMap(mark)
+    var marks: [PatternPrimitive] = []
+    let estCols = max(1, Int((rect.width / stepX).rounded(.up)))
+    let estRows = max(1, Int((rect.height / stepY).rounded(.up)))
+    marks.reserveCapacity(estCols * estRows * perCell)
+    forEachOrigin(in: rect, stepX: stepX, stepY: stepY, phaseX: phaseX, phaseY: phaseY) { center in
+        emit(center, &marks)
+    }
+    return marks
 }
 
-private func origins(
+private func forEachOrigin(
     in rect: CGRect,
     stepX: CGFloat,
     stepY: CGFloat,
     phaseX: CGFloat,
-    phaseY: CGFloat
-) -> [CGPoint] {
-    guard rect.width > 1, rect.height > 1, stepX > 0, stepY > 0 else { return [] }
+    phaseY: CGFloat,
+    body: (CGPoint) -> Void
+) {
+    guard stepX > 0, stepY > 0 else { return }
     let x0 = rect.minX + positiveMod(phaseX, stepX)
     let y0 = rect.minY + positiveMod(phaseY, stepY)
-    var points: [CGPoint] = []
+    var emitted = false
     var y = y0
     while y < rect.maxY {
         var x = x0
         while x < rect.maxX {
-            points.append(CGPoint(x: x, y: y))
+            body(CGPoint(x: x, y: y))
+            emitted = true
             x += stepX
         }
         y += stepY
     }
-    if points.isEmpty {
-        points.append(CGPoint(x: rect.midX, y: rect.midY))
+    if !emitted {
+        body(CGPoint(x: rect.midX, y: rect.midY))
     }
-    return points
 }
 
 private func waveMarks(in rect: CGRect, phaseX: CGFloat, phaseY: CGFloat) -> [PatternPrimitive] {
@@ -251,13 +267,17 @@ private func waveMarks(in rect: CGRect, phaseX: CGFloat, phaseY: CGFloat) -> [Pa
     let wavelength: CGFloat = 13
     let amplitude: CGFloat = 2.2
     let shift = positiveMod(phaseX, wavelength)
+    let twoPiOverWavelength = (2 * .pi) / wavelength
+    let pointCap = max(2, Int((rect.width / 2).rounded(.up)) + 2)
     var marks: [PatternPrimitive] = []
+    marks.reserveCapacity(max(1, Int((rect.height / row).rounded(.up))))
     var y = rect.minY + 2 + positiveMod(phaseY, row)
     while y < rect.maxY - 1 {
         var points: [CGPoint] = []
+        points.reserveCapacity(pointCap)
         var x = rect.minX
         while x <= rect.maxX + 0.01 {
-            let theta = ((x + shift) / wavelength) * (2 * .pi)
+            let theta = (x + shift) * twoPiOverWavelength
             points.append(CGPoint(x: x, y: y + sin(theta) * amplitude))
             x += 2
         }
@@ -268,7 +288,11 @@ private func waveMarks(in rect: CGRect, phaseX: CGFloat, phaseY: CGFloat) -> [Pa
     }
     if marks.isEmpty {
         marks.append(.stroke(
-            points: [CGPoint(x: rect.minX, y: rect.midY), CGPoint(x: rect.maxX, y: rect.midY - 1.4), CGPoint(x: rect.maxX, y: rect.midY)],
+            points: [
+                CGPoint(x: rect.minX, y: rect.midY),
+                CGPoint(x: rect.midX, y: rect.midY - 1.4),
+                CGPoint(x: rect.maxX, y: rect.midY)
+            ],
             width: 1.05,
             closed: false
         ))
@@ -280,6 +304,7 @@ private func crosshatchMarks(in rect: CGRect, phaseX: CGFloat, phaseY: CGFloat) 
     let step: CGFloat = 8
     let shift = positiveMod(phaseX + phaseY, step)
     var marks: [PatternPrimitive] = []
+    marks.reserveCapacity(max(2, Int(((rect.width + rect.height) / step).rounded(.up)) * 2 + 2))
     var downRight = rect.minX - rect.height + shift
     while downRight < rect.maxX {
         marks.append(.stroke(
@@ -309,15 +334,16 @@ private func crosshatchMarks(in rect: CGRect, phaseX: CGFloat, phaseY: CGFloat) 
 
 private func stippleMarks(in rect: CGRect, phaseX: CGFloat, phaseY: CGFloat) -> [PatternPrimitive] {
     let step: CGFloat = 4.7
-    let points = origins(in: rect, stepX: step, stepY: step, phaseX: phaseX, phaseY: phaseY)
     var marks: [PatternPrimitive] = []
-    for center in points {
+    let est = max(1, Int((rect.width / step).rounded(.up)) * Int((rect.height / step).rounded(.up)))
+    marks.reserveCapacity(est)
+    forEachOrigin(in: rect, stepX: step, stepY: step, phaseX: phaseX, phaseY: phaseY) { center in
         let column = Int((center.x / step).rounded())
         let row = Int((center.y / step).rounded())
         var mix = UInt32(bitPattern: Int32(truncatingIfNeeded: column &* 1_664_525 &+ row &* 2_265_843 &+ 1_013_904_223))
         mix ^= mix >> 16
         mix = mix &* 2_246_822_519
-        if mix % 5 == 0 { continue }
+        if mix % 5 == 0 { return }
         let jx = CGFloat(Int(mix % 5)) - 2
         let jy = CGFloat(Int((mix >> 8) % 5)) - 2
         let diameter: CGFloat = mix % 3 == 0 ? 0.95 : 1.35
