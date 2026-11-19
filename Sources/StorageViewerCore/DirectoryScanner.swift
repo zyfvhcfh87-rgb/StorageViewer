@@ -104,6 +104,7 @@ private final class WorkQueue: @unchecked Sendable {
     private var resumeJobs: [ScanJob] = []
     private var runningFdWorkers = 0
     private var runningResumeWorkers = 0
+    private var heldResumeParents = 0
     private var accept = true
     private var nextID = 0
 
@@ -143,12 +144,12 @@ private final class WorkQueue: @unchecked Sendable {
         cond.unlock()
     }
 
-    /// True when another fd job can still close a folder. False when waiting would stall the scan.
+    /// True when another job can still close a folder. False when waiting would stall the scan.
     func waitForClose() -> Bool {
         cond.lock()
         defer { cond.unlock() }
         guard accept else { return false }
-        let canFreeFD = runningFdWorkers > 0 || !fdJobs.isEmpty
+        let canFreeFD = runningFdWorkers > 0 || !fdJobs.isEmpty || heldResumeParents > 0
         if !canFreeFD { return false }
         _ = cond.wait(until: Date(timeIntervalSinceNow: 0.05))
         return accept
@@ -156,6 +157,19 @@ private final class WorkQueue: @unchecked Sendable {
 
     func noteClosed() {
         cond.lock()
+        cond.broadcast()
+        cond.unlock()
+    }
+
+    func noteResumeParentOpened() {
+        cond.lock()
+        heldResumeParents += 1
+        cond.unlock()
+    }
+
+    func noteResumeParentClosed() {
+        cond.lock()
+        heldResumeParents -= 1
         cond.broadcast()
         cond.unlock()
     }
@@ -558,6 +572,7 @@ private final class ParallelScanner: @unchecked Sendable {
                 stats.add(files: 0, bytes: 0, skipped: pending.count, progress: progress)
                 return
             }
+            queue.noteResumeParentOpened()
 
             var opened: [Int] = []
             var rest: [String] = []
@@ -589,7 +604,7 @@ private final class ParallelScanner: @unchecked Sendable {
                 }
             }
             close(parent)
-            queue.noteClosed()
+            queue.noteResumeParentClosed()
 
             if !opened.isEmpty { addChildren(opened, to: parentID) }
             if skipped > 0 {
