@@ -329,7 +329,7 @@ def main():
     )
     atlas(doc, 2480)
 
-    out = Path("/Users/razvan-constantinbotezatu/Desktop/StorageViewer/design/storageviewer-variants.figcraft")
+    out = Path(__file__).resolve().parent / "storageviewer-variants.figcraft"
     doc.dump(out)
     print(out, "nodes", doc.next_id - 1)
 

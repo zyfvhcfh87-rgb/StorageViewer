@@ -177,6 +177,26 @@ final class TreeEditorTests: XCTestCase {
         return ids
     }
 
+    func testMountNodesAreNotEdited() throws {
+        let mount = FileNode(name: "Other", isDirectory: true, byteSize: 0, category: .other, isMount: true)
+        let file = FileNode(name: "a.txt", isDirectory: false, byteSize: 1, category: .documents)
+        let root = FileNode(name: "root", isDirectory: true, byteSize: 1, category: .documents, children: [mount, file])
+        root.linkParents()
+        let rootURL = FileManager.default.temporaryDirectory
+
+        XCTAssertThrowsError(try TreeEditor.rename(mount, to: "renamed", rootURL: rootURL)) {
+            XCTAssertEqual($0 as? TreeEditError, .mountPoint)
+        }
+        XCTAssertThrowsError(try TreeEditor.trash(mount, rootURL: rootURL)) {
+            XCTAssertEqual($0 as? TreeEditError, .mountPoint)
+        }
+        XCTAssertThrowsError(try TreeEditor.duplicate(mount, rootURL: rootURL)) {
+            XCTAssertEqual($0 as? TreeEditError, .mountPoint)
+        }
+        XCTAssertFalse(TreeEditor.canPaste(file, onto: mount))
+        XCTAssertFalse(TreeEditor.canPaste(mount, onto: root))
+    }
+
     private func names(_ url: URL) throws -> [String] {
         try FileManager.default.contentsOfDirectory(atPath: url.path)
     }

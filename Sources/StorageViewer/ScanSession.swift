@@ -211,7 +211,7 @@ final class ScanSession {
     }
 
     func zoom(_ node: FileNode) {
-        guard node.isDirectory else {
+        guard node.isDirectory, !node.isMount else {
             selectFromMap(node)
             return
         }
@@ -230,7 +230,7 @@ final class ScanSession {
     }
 
     func toggleDisclosure(_ node: FileNode) {
-        guard node.isDirectory else { return }
+        guard node.isDirectory, !node.isMount else { return }
         let previous = navigation
         withAnimation(Self.browse) {
             if expanded.contains(node.id) {

@@ -92,6 +92,25 @@ public enum NameFilter {
         return ids
     }
 
+    /// Ids of `nodes` whose own name or any nested name matches `query`.
+    /// Stops descending a folder as soon as its name matches, so a map only
+    /// needs to know which blocks to keep bright, not every name below them.
+    public static func folderHits(in nodes: [FileNode], query: String) -> Set<UUID> {
+        let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return Set(nodes.map(\.id)) }
+        let matcher = Matcher(trimmed: trimmed)
+        func subtreeMatches(_ node: FileNode) -> Bool {
+            if matcher.matches(node.name) { return true }
+            guard node.isDirectory else { return false }
+            return node.children.contains { subtreeMatches($0) }
+        }
+        var ids = Set<UUID>()
+        for node in nodes where subtreeMatches(node) {
+            ids.insert(node.id)
+        }
+        return ids
+    }
+
     /// Pre-lowercased ASCII needle for fast substring checks without ICU bridging,
     /// falling back to Unicode case + diacritic-insensitive search for non-ASCII strings.
     private struct Matcher {

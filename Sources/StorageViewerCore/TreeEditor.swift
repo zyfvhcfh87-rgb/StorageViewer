@@ -6,6 +6,7 @@ public enum TreeEditError: LocalizedError, Equatable, Sendable {
     case slashInName
     case missingItem
     case cannotPasteHere
+    case mountPoint
     case failed(String)
 
     public var errorDescription: String? {
@@ -18,6 +19,8 @@ public enum TreeEditError: LocalizedError, Equatable, Sendable {
             return "That item is no longer in this scan."
         case .cannotPasteHere:
             return "A folder can’t be pasted into itself."
+        case .mountPoint:
+            return "That folder is another volume. StorageViewer doesn’t change it."
         case .failed(let message):
             return message
         }
@@ -57,7 +60,8 @@ public enum TreeEditor {
     }
 
     public static func canPaste(_ copied: FileNode, onto target: FileNode) -> Bool {
-        guard copied.parent != nil, let destination = receiver(for: target) else { return false }
+        guard copied.parent != nil, !copied.isMount, let destination = receiver(for: target) else { return false }
+        if destination.isMount { return false }
         if copied.isDirectory && copied.contains(destination) { return false }
         return true
     }
@@ -66,6 +70,7 @@ public enum TreeEditor {
         if let error = validateName(rawName) { throw error }
         let name = rawName.trimmingCharacters(in: .whitespacesAndNewlines)
         guard let parent = node.parent else { throw TreeEditError.missingItem }
+        if node.isMount { throw TreeEditError.mountPoint }
         if name == node.name { return }
 
         let source = try requireSameFile(url: url(of: node, rootURL: rootURL), recordedID: node.fileID)
@@ -102,6 +107,7 @@ public enum TreeEditor {
 
     public static func prepareDuplicate(_ node: FileNode, rootURL: URL) throws -> (folder: FileNode, plan: CopyPlan) {
         guard let parent = node.parent else { throw TreeEditError.missingItem }
+        if node.isMount { throw TreeEditError.mountPoint }
         return (parent, makeCopyPlan(of: node, into: parent, rootURL: rootURL))
     }
 
@@ -109,6 +115,7 @@ public enum TreeEditor {
         guard copied.parent != nil, let destination = receiver(for: target) else {
             throw TreeEditError.missingItem
         }
+        if copied.isMount || destination.isMount { throw TreeEditError.mountPoint }
         if copied.isDirectory && copied.contains(destination) {
             throw TreeEditError.cannotPasteHere
         }
@@ -187,6 +194,7 @@ public enum TreeEditor {
     @discardableResult
     public static func trash(_ node: FileNode, rootURL: URL) throws -> URL? {
         guard let parent = node.parent else { throw TreeEditError.missingItem }
+        if node.isMount { throw TreeEditError.mountPoint }
         let source = try requireSameFile(url: url(of: node, rootURL: rootURL), recordedID: node.fileID)
         var resultingURL: NSURL?
         do {

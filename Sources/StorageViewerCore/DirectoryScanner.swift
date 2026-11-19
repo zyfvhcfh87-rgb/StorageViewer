@@ -55,7 +55,26 @@ public enum DirectoryScanner {
         progress: @escaping @Sendable (ScanProgress) -> Void = { _ in },
         isCancelled: @escaping @Sendable () -> Bool = { false }
     ) -> ScanOutcome {
-        ParallelScanner(progress: progress, isCancelled: isCancelled).run(url: url, displayName: displayName)
+        scan(url: url, displayName: displayName, deferDirectoryOpens: false, inlineResume: false, progress: progress, isCancelled: isCancelled)
+    }
+
+    /// Test-only entry point. `deferDirectoryOpens` makes every child-directory open fail
+    /// like EMFILE; `inlineResume` services each resume job on the publishing worker at the
+    /// moment it is queued — the earliest point another worker could run it.
+    static func scan(
+        url: URL,
+        displayName: String,
+        deferDirectoryOpens: Bool,
+        inlineResume: Bool,
+        progress: @escaping @Sendable (ScanProgress) -> Void = { _ in },
+        isCancelled: @escaping @Sendable () -> Bool = { false }
+    ) -> ScanOutcome {
+        ParallelScanner(
+            progress: progress,
+            isCancelled: isCancelled,
+            deferDirectoryOpens: deferDirectoryOpens,
+            inlineResume: inlineResume
+        ).run(url: url, displayName: displayName)
     }
 }
 
@@ -125,11 +144,13 @@ private final class WorkQueue: @unchecked Sendable {
     }
 
     /// Lower priority than open-fd jobs: draining fd jobs first closes handles and frees slots.
-    func pushResume(path: String, names: [String], depth: Int, attachTo: Int) {
+    /// Returns false when the scan is stopping and the job was dropped.
+    @discardableResult
+    func pushResume(path: String, names: [String], depth: Int, attachTo: Int) -> Bool {
         cond.lock()
         guard accept else {
             cond.unlock()
-            return
+            return false
         }
         resumeJobs.append(ScanJob(
             id: -1,
@@ -142,6 +163,7 @@ private final class WorkQueue: @unchecked Sendable {
         ))
         cond.signal()
         cond.unlock()
+        return true
     }
 
     /// True when another job can still close a folder. False when waiting would stall the scan.
@@ -308,18 +330,22 @@ private func workerCount() -> Int {
 private final class ParallelScanner: @unchecked Sendable {
     private let progress: @Sendable (ScanProgress) -> Void
     private let isCancelled: @Sendable () -> Bool
+    private let deferDirectoryOpens: Bool
+    private let inlineResume: Bool
     private let queue = WorkQueue()
     private let stats = ScanStats()
     private let recordsLock = OSAllocatedUnfairLock()
     private var records: [DirRecord?] = []
-    private var rootDevice: dev_t?
+    private var rootDevice: UInt32?
     private var rootID = 0
     private let scanSalt: UInt64
     private var nextNodeID: UInt64 = 0
 
     init(
         progress: @escaping @Sendable (ScanProgress) -> Void,
-        isCancelled: @escaping @Sendable () -> Bool
+        isCancelled: @escaping @Sendable () -> Bool,
+        deferDirectoryOpens: Bool = false,
+        inlineResume: Bool = false
     ) {
         self.progress = progress
         self.isCancelled = isCancelled
@@ -328,6 +354,8 @@ private final class ParallelScanner: @unchecked Sendable {
             return count
         }
         self.scanSalt = (sequence &<< 32) | UInt64.random(in: 0 ... UInt64(UInt32.max))
+        self.deferDirectoryOpens = deferDirectoryOpens
+        self.inlineResume = inlineResume
     }
 
     func run(url: URL, displayName: String) -> ScanOutcome {
@@ -353,7 +381,7 @@ private final class ParallelScanner: @unchecked Sendable {
         var info = stat()
         let rootIdentity: FileIdentity?
         if fstat(rootFd, &info) == 0 {
-            rootDevice = info.st_dev
+            rootDevice = UInt32(truncatingIfNeeded: info.st_dev)
             rootIdentity = FileIdentity(info)
         } else {
             rootIdentity = nil
@@ -431,7 +459,7 @@ private final class ParallelScanner: @unchecked Sendable {
             if fstat(job.fd, &info) == 0 {
                 identity = FileIdentity(info)
                 // Guard against crossing mount points when the parent's bulk listing lacked dev_t.
-                if job.depth > 0, let rootDevice, info.st_dev != rootDevice {
+                if job.depth > 0, let rootDevice, UInt32(truncatingIfNeeded: info.st_dev) != rootDevice {
                     store(job, DirRecord(name: job.name, denied: false, files: [], childIDs: [], mounts: [], skipped: 0, identity: identity))
                     return
                 }
@@ -497,10 +525,12 @@ private final class ParallelScanner: @unchecked Sendable {
                     deferred.append(entry.name)
                     continue
                 }
-                let childFd = entry.name.withCString { openat(job.fd, $0, childFlags) }
+                let childFd = deferDirectoryOpens
+                    ? Int32(-1)
+                    : entry.name.withCString { openat(job.fd, $0, childFlags) }
                 if childFd < 0 {
                     let err = errno
-                    if err == EMFILE || err == ENFILE {
+                    if deferDirectoryOpens || err == EMFILE || err == ENFILE {
                         deferred.append(entry.name)
                     } else if err != ENOENT {
                         skipped += 1
@@ -535,6 +565,12 @@ private final class ParallelScanner: @unchecked Sendable {
             }
         }
 
+        let resumePath = deferred.isEmpty ? nil : path(of: job.fd)
+        if !deferred.isEmpty, resumePath == nil {
+            skipped += deferred.count
+        }
+        // Store before publishing: a resume worker can run the moment the job is queued
+        // and attaches its children to this record.
         store(job, DirRecord(
             name: job.name,
             denied: false,
@@ -545,7 +581,12 @@ private final class ParallelScanner: @unchecked Sendable {
             identity: identity
         ))
         if let resumePath {
-            queue.pushResume(path: resumePath, names: deferred, depth: job.depth, attachTo: job.id)
+            if inlineResume {
+                resume(ScanJob(id: -1, fd: -1, name: "", depth: job.depth, resumePath: resumePath, resumeNames: deferred, attachTo: job.id))
+            } else if !queue.pushResume(path: resumePath, names: deferred, depth: job.depth, attachTo: job.id) {
+                addSkipped(deferred.count, to: job.id)
+                stats.add(files: 0, bytes: 0, skipped: deferred.count, progress: progress)
+            }
         }
         stats.add(files: seen, bytes: bytes, skipped: skipped, progress: progress)
     }
@@ -613,7 +654,10 @@ private final class ParallelScanner: @unchecked Sendable {
             }
             if cancelledMidLoop || rest.isEmpty { return }
             if !opened.isEmpty {
-                queue.pushResume(path: path, names: rest, depth: job.depth, attachTo: parentID)
+                if !queue.pushResume(path: path, names: rest, depth: job.depth, attachTo: parentID) {
+                    addSkipped(rest.count, to: parentID)
+                    stats.add(files: 0, bytes: 0, skipped: rest.count, progress: progress)
+                }
                 return
             }
             pending = rest
@@ -704,7 +748,8 @@ private final class ParallelScanner: @unchecked Sendable {
                 isDirectory: true,
                 byteSize: 0,
                 category: .other,
-                fileID: mount.identity
+                fileID: mount.identity,
+                isMount: true
             ))
         }
 
@@ -750,8 +795,8 @@ private final class ParallelScanner: @unchecked Sendable {
     }
 }
 
-private struct BulkEntry {
-    enum Kind {
+struct BulkEntry {
+    enum Kind: Equatable {
         case file
         case directory
         case denied
@@ -760,12 +805,14 @@ private struct BulkEntry {
     var name: String
     var kind: Kind
     var byteSize: Int64
-    var device: dev_t?
+    /// Raw `dev_t`. Kept unsigned: devfs and other devices set the top bit,
+    /// and a signed conversion of those values traps.
+    var device: UInt32?
     var inode: UInt64?
 
     var identity: FileIdentity? {
         guard let device, let inode else { return nil }
-        return FileIdentity(device: UInt64(UInt32(truncatingIfNeeded: device)), inode: inode)
+        return FileIdentity(device: UInt64(device), inode: inode)
     }
 }
 
@@ -791,7 +838,6 @@ private func listWithBulk(fd: Int32, buffer: UnsafeMutableRawPointer, capacity: 
     attributes.fileattr = attrgroup_t(UInt32(ATTR_FILE_DATALENGTH))
 
     var entries: [BulkEntry] = []
-    var sawAny = false
 
     while true {
         let count = getattrlistbulk(fd, &attributes, buffer, capacity, 0)
@@ -802,7 +848,6 @@ private func listWithBulk(fd: Int32, buffer: UnsafeMutableRawPointer, capacity: 
             if !sawAny, err == EACCES || err == EPERM { return .denied }
             return .fallback
         }
-        sawAny = true
         var offset = 0
         for _ in 0..<count {
             let base = buffer.advanced(by: offset)
@@ -817,7 +862,7 @@ private func listWithBulk(fd: Int32, buffer: UnsafeMutableRawPointer, capacity: 
     return .ok(entries)
 }
 
-private func parseBulkEntry(base: UnsafeMutableRawPointer, length: Int) -> BulkEntry? {
+func parseBulkEntry(base: UnsafeMutableRawPointer, length: Int) -> BulkEntry? {
     var cursor = 4
     guard cursor + MemoryLayout<attribute_set_t>.size <= length else { return nil }
     let returned = base.advanced(by: cursor).loadUnaligned(as: attribute_set_t.self)
@@ -844,11 +889,11 @@ private func parseBulkEntry(base: UnsafeMutableRawPointer, length: Int) -> BulkE
     }
     if name == "." || name == ".." { return nil }
 
-    var device: dev_t?
+    var device: UInt32?
     if returned.commonattr & UInt32(ATTR_CMN_DEVID) != 0 {
-        guard cursor + MemoryLayout<dev_t>.size <= length else { return nil }
-        device = base.advanced(by: cursor).loadUnaligned(as: dev_t.self)
-        cursor += MemoryLayout<dev_t>.size
+        guard cursor + 4 <= length else { return nil }
+        device = base.advanced(by: cursor).loadUnaligned(as: UInt32.self)
+        cursor += 4
     }
 
     var objectType: UInt32 = 0
@@ -932,10 +977,11 @@ private func listFallback(fd: Int32) -> BulkList {
         }
         let mode = info.st_mode & S_IFMT
         let inode = UInt64(truncatingIfNeeded: info.st_ino)
+        let device = UInt32(truncatingIfNeeded: info.st_dev)
         if mode == S_IFDIR {
-            entries.append(BulkEntry(name: name, kind: .directory, byteSize: 0, device: info.st_dev, inode: inode))
+            entries.append(BulkEntry(name: name, kind: .directory, byteSize: 0, device: device, inode: inode))
         } else {
-            entries.append(BulkEntry(name: name, kind: .file, byteSize: max(0, Int64(info.st_size)), device: info.st_dev, inode: inode))
+            entries.append(BulkEntry(name: name, kind: .file, byteSize: max(0, Int64(info.st_size)), device: device, inode: inode))
         }
     }
     return .ok(entries)

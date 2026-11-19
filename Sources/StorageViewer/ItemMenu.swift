@@ -7,15 +7,18 @@ struct ItemMenu: View {
     @Environment(ScanSession.self) private var session
 
     var body: some View {
-        Button("Open") { session.openItem(node) }
-        Button("Reveal in Finder") { session.revealInFinder(node) }
-        Button("Rename") { session.beginRename(node) }
-        Button("Copy") { session.rememberCopy(node) }
-        Button("Paste") { session.paste(onto: node) }
-            .disabled(!session.canPaste(onto: node))
-        Button("Duplicate") { session.duplicate(node) }
-        Divider()
-        Button("Move to Trash", role: .destructive) { session.confirmTrash(node) }
+        let entries = ItemActions.entries(for: node, session: session)
+        ForEach(Array(entries.enumerated()), id: \.offset) { _, entry in
+            switch entry {
+            case .separator:
+                Divider()
+            case .item(let title, let enabled, let destructive, let action):
+                Button(role: destructive ? .destructive : nil, action: action) {
+                    Text(title)
+                }
+                .disabled(!enabled)
+            }
+        }
     }
 }
 
@@ -163,20 +166,41 @@ final class TreemapMenuView: NSView {
     }
 }
 
+@MainActor
 enum ItemActions {
-    @MainActor
+    enum Entry {
+        case item(title: String, enabled: Bool, destructive: Bool, action: () -> Void)
+        case separator
+    }
+
+    /// The one list both menus render. Add or reorder items here.
+    static func entries(for node: FileNode, session: ScanSession) -> [Entry] {
+        [
+            .item(title: "Open", enabled: true, destructive: false) { session.openItem(node) },
+            .item(title: "Reveal in Finder", enabled: true, destructive: false) { session.revealInFinder(node) },
+            .item(title: "Rename", enabled: !node.isMount, destructive: false) { session.beginRename(node) },
+            .item(title: "Copy", enabled: !node.isMount, destructive: false) { session.rememberCopy(node) },
+            .item(title: "Paste", enabled: session.canPaste(onto: node), destructive: false) {
+                session.paste(onto: node)
+            },
+            .item(title: "Duplicate", enabled: !node.isMount, destructive: false) { session.duplicate(node) },
+            .separator,
+            .item(title: "Move to Trash", enabled: !node.isMount, destructive: true) { session.confirmTrash(node) }
+        ]
+    }
+
     static func menu(for node: FileNode, session: ScanSession) -> NSMenu {
         let menu = NSMenu()
-        menu.addItem(item("Open") { session.openItem(node) })
-        menu.addItem(item("Reveal in Finder") { session.revealInFinder(node) })
-        menu.addItem(item("Rename") { session.beginRename(node) })
-        menu.addItem(item("Copy") { session.rememberCopy(node) })
-        let paste = item("Paste") { session.paste(onto: node) }
-        paste.isEnabled = session.canPaste(onto: node)
-        menu.addItem(paste)
-        menu.addItem(item("Duplicate") { session.duplicate(node) })
-        menu.addItem(.separator())
-        menu.addItem(item("Move to Trash") { session.confirmTrash(node) })
+        for entry in entries(for: node, session: session) {
+            switch entry {
+            case .separator:
+                menu.addItem(.separator())
+            case .item(let title, let enabled, _, let action):
+                let item = item(title, action: action)
+                item.isEnabled = enabled
+                menu.addItem(item)
+            }
+        }
         return menu
     }
 

@@ -33,6 +33,27 @@ final class LayoutTests: XCTestCase {
         XCTAssertEqual(covered, boundsArea, accuracy: 0.5)
     }
 
+    func testWideFolderKeepsAreasProportional() {
+        let entries = (0..<2_000).map { index in
+            (id: UUID(), size: Int64(1 + index % 97))
+        }
+        let bounds = CGRect(x: 0, y: 0, width: 1_200, height: 800)
+        let items = TreemapLayout.layout(entries: entries, in: bounds)
+        XCTAssertEqual(items.count, entries.count)
+
+        let total = entries.reduce(Int64(0)) { $0 + $1.size }
+        let area = bounds.width * bounds.height
+        var covered = 0.0
+        for item in items {
+            let size = entries.first { $0.id == item.id }!.size
+            let actual = item.rect.width * item.rect.height
+            let expected = Double(size) / Double(total) * area
+            XCTAssertEqual(actual, expected, accuracy: max(0.5, expected * 0.002))
+            covered += actual
+        }
+        XCTAssertEqual(covered, area, accuracy: 1)
+    }
+
     func testSingleChildFillsTheBounds() {
         let id = UUID()
         let bounds = CGRect(x: 2, y: 4, width: 100, height: 40)
@@ -129,6 +150,23 @@ final class LayoutTests: XCTestCase {
 
         let collapsed = NameFilter.listedRows(children: [vacation, music], expanded: [], query: "", parentSize: 17)
         XCTAssertEqual(collapsed.map(\.node.name), ["Vacation", "Music"])
+    }
+
+    func testFolderHitsKeepsOnlyTopLevelMatches() {
+        let photo = FileNode(name: "IMG_0001.jpg", isDirectory: false, byteSize: 10, category: .images)
+        let vacation = FileNode(name: "Vacation", isDirectory: true, byteSize: 10, category: .images, children: [photo])
+        let song = FileNode(name: "song.mp3", isDirectory: false, byteSize: 3, category: .audio)
+        let music = FileNode(name: "Music", isDirectory: true, byteSize: 3, category: .audio, children: [song])
+        let note = FileNode(name: "readme.txt", isDirectory: false, byteSize: 1, category: .documents)
+        let nodes = [vacation, music, note]
+
+        XCTAssertEqual(NameFilter.folderHits(in: nodes, query: "vac"), [vacation.id])
+        XCTAssertEqual(NameFilter.folderHits(in: nodes, query: "song"), [music.id])
+        XCTAssertEqual(NameFilter.folderHits(in: nodes, query: "IMG"), [vacation.id])
+        XCTAssertEqual(NameFilter.folderHits(in: nodes, query: "zzz"), [])
+        XCTAssertEqual(NameFilter.folderHits(in: nodes, query: "  "), Set(nodes.map(\.id)))
+
+        XCTAssertEqual(NameFilter.hits(in: nodes, query: "IMG"), [vacation.id, photo.id])
     }
 
     func testPathFromRootSkipsLargeSiblings() {

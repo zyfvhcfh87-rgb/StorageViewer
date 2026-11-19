@@ -141,7 +141,7 @@ private struct NodeRowView: View {
                 .lineLimit(1)
                 .truncationMode(.tail)
                 .frame(maxWidth: .infinity, alignment: .leading)
-            if node.isDirectory {
+            if node.isDirectory, !node.isMount {
                 Button {
                     onToggle(node)
                 } label: {
