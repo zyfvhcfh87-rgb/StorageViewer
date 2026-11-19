@@ -118,7 +118,12 @@ public enum TreeEditor {
     /// Executes disk copy + scan for `plan` without touching any existing `FileNode`.
     public static func executeCopy(_ plan: CopyPlan) throws -> FileNode {
         let source = try requireSameFile(url: plan.sourceURL, recordedID: plan.sourceFileID)
-        _ = try requireSameFile(url: plan.destinationDirectoryURL, recordedID: plan.destinationDirectoryFileID)
+        // The scan root may be a symlink; the scanner recorded its target's identity.
+        _ = try requireSameFile(
+            url: plan.destinationDirectoryURL,
+            recordedID: plan.destinationDirectoryFileID,
+            followSymlink: true
+        )
 
         let name = uniqueName(
             in: plan.destinationDirectoryURL,
@@ -214,9 +219,14 @@ public enum TreeEditor {
     }
 
     /// The path still has to be the file that was scanned.
-    private static func requireSameFile(url source: URL, recordedID: FileIdentity?) throws -> LocatedFile {
+    private static func requireSameFile(
+        url source: URL,
+        recordedID: FileIdentity?,
+        followSymlink: Bool = false
+    ) throws -> LocatedFile {
         var info = stat()
-        guard lstat(source.path, &info) == 0 else {
+        let status = followSymlink ? stat(source.path, &info) : lstat(source.path, &info)
+        guard status == 0 else {
             throw TreeEditError.failed("That item changed on disk. Scan again.")
         }
         let identity = FileIdentity(info)
