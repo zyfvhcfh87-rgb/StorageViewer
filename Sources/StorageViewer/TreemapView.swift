@@ -20,14 +20,13 @@ struct TreemapView: View {
     @State private var layouts = LayoutMemo()
     @State private var hitCache = HitCache()
     @State private var textCache = TextCache()
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
         GeometryReader { geo in
             let snapshot = picture(in: geo.size)
             ZStack {
-                Canvas { context, _ in
-                    draw(snapshot, in: context)
-                }
+                treemapCanvas(snapshot)
                 if snapshot.children.isEmpty, snapshot.siblingOpacity < 0.2 {
                     Text(folder.children.isEmpty ? "This folder is empty." : "These items are 0 bytes.")
                         .font(.system(size: 12))
@@ -73,6 +72,26 @@ struct TreemapView: View {
         .onChange(of: folder.id) { _, _ in
             beginFlight(to: folder)
         }
+    }
+
+    /// The map stays a plain canvas until a block is hovered. One phase then
+    /// drives the inward wave. Mask geometry stays in the layout memo.
+    private func treemapCanvas(_ snapshot: TreemapPicture) -> some View {
+        let animate = hovered != nil && !reduceMotion
+        return TimelineView(.animation(minimumInterval: 1.0 / 30.0, paused: !animate)) { timeline in
+            let phase = hoverPhase(at: timeline.date, animate: animate)
+            Canvas { context, _ in
+                draw(snapshot, hoverPhase: phase, animateHover: animate, in: context)
+            }
+        }
+        .allowsHitTesting(false)
+    }
+
+    private func hoverPhase(at date: Date, animate: Bool) -> CGFloat {
+        guard animate else { return 0 }
+        let cycle = 2.8
+        let raw = date.timeIntervalSinceReferenceDate.truncatingRemainder(dividingBy: cycle) / cycle
+        return CGFloat(raw)
     }
 
     private func beginFlight(to destination: FileNode) {
@@ -228,7 +247,12 @@ struct TreemapView: View {
         }
     }
 
-    private func draw(_ picture: TreemapPicture, in context: GraphicsContext) {
+    private func draw(
+        _ picture: TreemapPicture,
+        hoverPhase: CGFloat,
+        animateHover: Bool,
+        in context: GraphicsContext
+    ) {
         for block in picture.siblings {
             fill(block, opacity: picture.siblingOpacity, bright: picture.bright, in: context)
         }
@@ -242,12 +266,26 @@ struct TreemapView: View {
         }
         if picture.siblingOpacity > 0.4 {
             for block in picture.siblings {
-                strokeAndLabel(block, opacity: picture.siblingOpacity, bright: picture.bright, in: context)
+                strokeAndLabel(
+                    block,
+                    opacity: picture.siblingOpacity,
+                    bright: picture.bright,
+                    hoverPhase: hoverPhase,
+                    animateHover: animateHover,
+                    in: context
+                )
             }
         }
         if picture.childOpacity > 0.72 {
             for block in picture.children {
-                strokeAndLabel(block, opacity: picture.childOpacity, bright: picture.bright, in: context)
+                strokeAndLabel(
+                    block,
+                    opacity: picture.childOpacity,
+                    bright: picture.bright,
+                    hoverPhase: hoverPhase,
+                    animateHover: animateHover,
+                    in: context
+                )
             }
         }
     }
@@ -283,16 +321,19 @@ struct TreemapView: View {
         }
     }
 
-    private func strokeAndLabel(_ block: PlacedBlock, opacity: CGFloat, bright: Set<UUID>?, in context: GraphicsContext) {
+    private func strokeAndLabel(
+        _ block: PlacedBlock,
+        opacity: CGFloat,
+        bright: Set<UUID>?,
+        hoverPhase: CGFloat,
+        animateHover: Bool,
+        in context: GraphicsContext
+    ) {
         let rect = padded(block.rect)
         guard rect.width > 2, rect.height > 2 else { return }
         let dimmed = dimmed(block.node, bright: bright)
         if block.node.id == hovered, block.node.id != selection, !dimmed {
-            context.stroke(
-                Path(roundedRect: rect.insetBy(dx: 0.5, dy: 0.5), cornerRadius: 1),
-                with: .color(Theme.text.opacity(0.45 * opacity)),
-                lineWidth: 1
-            )
+            paintHover(rect: rect, phase: hoverPhase, animate: animateHover, opacity: opacity, in: context)
         }
         let selected = block.node.id == selection
         if selected {
@@ -325,6 +366,67 @@ struct TreemapView: View {
                 sizeText,
                 at: CGPoint(x: rect.minX + 5, y: rect.minY + 21),
                 anchor: .leading
+            )
+        }
+    }
+
+    /// Bright rim plus a slow inward wave. A few inset strokes share one phase.
+    /// Painted before the label plate, so the name and size stay on top of the wave.
+    private func paintHover(rect: CGRect, phase: CGFloat, animate: Bool, opacity: CGFloat, in context: GraphicsContext) {
+        guard opacity > 0.05 else { return }
+        paintHoverFrame(rect: rect, opacity: opacity, in: context)
+        if animate {
+            paintHoverWave(rect: rect, phase: phase, opacity: opacity, in: context)
+        }
+    }
+
+    private func paintHoverFrame(rect: CGRect, opacity: CGFloat, in context: GraphicsContext) {
+        let bleed: CGFloat = rect.width > 12 && rect.height > 12 ? 1.6 : 0
+        var layer = context
+        layer.clip(to: Path(rect.insetBy(dx: -bleed, dy: -bleed)))
+        let rings: [(CGFloat, CGFloat, CGFloat)] = [
+            (0.2, 7.0, 0.16),
+            (1.0, 3.2, 0.40),
+            (1.35, 1.45, 0.94),
+        ]
+        let style = { (width: CGFloat) in
+            StrokeStyle(lineWidth: width, lineCap: .round, lineJoin: .round)
+        }
+        for (inset, width, alpha) in rings {
+            let edge = rect.insetBy(dx: inset, dy: inset)
+            guard edge.width > 1, edge.height > 1 else { continue }
+            layer.stroke(
+                Path(roundedRect: edge, cornerRadius: min(2, edge.height / 2)),
+                with: .color(Color.white.opacity(alpha * opacity)),
+                style: style(width)
+            )
+        }
+    }
+
+    private func paintHoverWave(rect: CGRect, phase: CGFloat, opacity: CGFloat, in context: GraphicsContext) {
+        let reach = min(rect.width, rect.height) * 0.42
+        guard reach > 18 else { return }
+        let envelope = sin(CGFloat.pi * min(1, max(0, phase)))
+        guard envelope > 0.04 else { return }
+        let lead = 8 + phase * (reach - 8)
+        // Crest, then two trailing rings. They share `phase` and move inward together.
+        let bands: [(CGFloat, CGFloat, CGFloat)] = [
+            (0, 1.7, 0.55),
+            (5, 2.8, 0.24),
+            (10, 3.6, 0.11),
+        ]
+        var layer = context
+        layer.clip(to: Path(rect))
+        for (lag, width, alpha) in bands {
+            let inset = lead - lag
+            guard inset > 2 else { continue }
+            let inner = rect.insetBy(dx: inset, dy: inset)
+            guard inner.width > 2, inner.height > 2 else { continue }
+            let fade = envelope * (1 - 0.45 * min(1, inset / reach))
+            layer.stroke(
+                Path(roundedRect: inner, cornerRadius: min(2, inner.height / 2)),
+                with: .color(Color.white.opacity(alpha * fade * opacity)),
+                style: StrokeStyle(lineWidth: width, lineCap: .round, lineJoin: .round)
             )
         }
     }
