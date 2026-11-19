@@ -897,9 +897,8 @@ private func listFallback(fd: Int32) -> BulkList {
         errno = 0
         guard let entryPtr = readdir(dir) else {
             let err = errno
-            if err != 0, entries.isEmpty, err == EACCES || err == EPERM {
-                return .denied
-            }
+            if err == EINTR { continue }
+            if err != 0 { return .denied }
             break
         }
         let nameLength = Int(entryPtr.pointee.d_namlen)
