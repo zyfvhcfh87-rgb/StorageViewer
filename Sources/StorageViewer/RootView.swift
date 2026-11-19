@@ -229,7 +229,6 @@ private struct ResultsView: View {
             TreemapView(
                 folder: current,
                 selection: session.selection,
-                hovered: session.hoveredID,
                 filter: session.filter,
                 onSelect: { session.selectFromMap($0) },
                 onZoom: { session.zoom($0) },
