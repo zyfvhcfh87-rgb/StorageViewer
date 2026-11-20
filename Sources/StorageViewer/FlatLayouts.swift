@@ -24,16 +24,50 @@ enum FlatLayout: String, CaseIterable, Identifiable {
 
 struct LayoutPicker: View {
     @Binding var layout: FlatLayout
+    @State private var hovered: FlatLayout?
 
     var body: some View {
-        Picker("Layout", selection: $layout) {
+        HStack(spacing: 2) {
             ForEach(FlatLayout.allCases) { item in
-                Text(item.title).tag(item)
+                let on = item == layout
+                Button {
+                    layout = item
+                } label: {
+                    Text(item.title)
+                        .font(.system(size: 12, weight: on ? .semibold : .medium))
+                        .foregroundStyle(on ? Theme.chromeInk : (hovered == item ? Theme.text : Theme.chromeMuted))
+                        .padding(.horizontal, 10)
+                        .frame(height: 24)
+                        .background {
+                            if on {
+                                Capsule().fill(Theme.chromeWhite)
+                            } else if hovered == item {
+                                Capsule().fill(Theme.chromeHover)
+                            }
+                        }
+                        .contentShape(Capsule())
+                }
+                .buttonStyle(.plain)
+                .onHover { inside in
+                    if inside {
+                        hovered = item
+                    } else if hovered == item {
+                        hovered = nil
+                    }
+                }
+                .accessibilityLabel(item.title)
+                .accessibilityIdentifier("layout-\(item.rawValue)")
+                .accessibilityAddTraits(on ? .isSelected : [])
             }
         }
-        .pickerStyle(.segmented)
-        .labelsHidden()
-        .frame(width: 300)
+        .padding(3)
+        .background(Theme.chromeFill, in: Capsule())
+        .overlay {
+            Capsule().strokeBorder(Theme.chromeHairline, lineWidth: 1)
+        }
+        .animation(.easeOut(duration: 0.16), value: layout)
+        .animation(.easeOut(duration: 0.12), value: hovered)
+        .accessibilityElement(children: .contain)
         .accessibilityIdentifier("layout-picker")
         .accessibilityLabel("Layout")
         .accessibilityValue(layout.title)

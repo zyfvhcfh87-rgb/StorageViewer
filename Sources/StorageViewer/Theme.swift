@@ -10,6 +10,15 @@ enum Theme {
     static let text = Color(red: 0xec / 255, green: 0xec / 255, blue: 0xec / 255)
     static let secondary = Color(red: 0x8b / 255, green: 0x8b / 255, blue: 0x8b / 255)
     static let accent = Color(red: 0x4c / 255, green: 0x8b / 255, blue: 0xf5 / 255)
+    /// Coss header. The white pill is the one selection; everything else stays hairline and muted.
+    static let chromeWhite = Color(red: 0xf4 / 255, green: 0xf4 / 255, blue: 0xf5 / 255)
+    static let chromeInk = Color(red: 0x17 / 255, green: 0x17 / 255, blue: 0x17 / 255)
+    static let chromeMuted = Color(red: 0x9a / 255, green: 0x9a / 255, blue: 0x9a / 255)
+    static let chromeFaint = Color(red: 0x6e / 255, green: 0x6e / 255, blue: 0x6e / 255)
+    static let chromeHairline = Color.white.opacity(0.08)
+    static let chromeFill = Color.white.opacity(0.04)
+    static let chromeHover = Color.white.opacity(0.08)
+    static let chromeStroke = Color.white.opacity(0.16)
     static let labelInk = Color(red: 0x12 / 255, green: 0x12 / 255, blue: 0x12 / 255)
     /// Amber is the selection only. Type blocks use the category colors.
     static let selection = Color(red: 0xe8 / 255, green: 0xa2 / 255, blue: 0x3a / 255)

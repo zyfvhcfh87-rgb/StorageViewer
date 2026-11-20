@@ -22,14 +22,15 @@ struct RootView: View {
         VStack(spacing: 0) {
             TopBar(layout: layoutBinding)
                 .padding(.leading, 78)
-                .padding(.trailing, 12)
-                .frame(height: 48)
-                .background(Theme.panel)
-            Rectangle().fill(Theme.border).frame(height: 1)
+                .padding(.trailing, 16)
+                .frame(height: 52)
+                .background(Theme.canvas)
+            Rectangle().fill(Theme.chromeHairline).frame(height: 1)
             content
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
         .background(Theme.canvas)
+        .ignoresSafeArea(edges: .top)
         .preferredColorScheme(.dark)
         .background(WindowChrome())
         .onAppear {
@@ -114,40 +115,56 @@ private struct TopBar: View {
     @Binding var layout: FlatLayout
 
     var body: some View {
-        HStack(spacing: 10) {
+        let canRescan = session.phase != .scanning && session.rootURL != nil
+        HStack(spacing: 14) {
             Text("StorageViewer")
-                .font(.system(size: 12, weight: .semibold))
+                .font(.custom("Avenir Next", size: 15).weight(.semibold))
+                .tracking(-0.6)
                 .foregroundStyle(Theme.text)
                 .lineLimit(1)
                 .fixedSize()
-            Rectangle()
-                .fill(Theme.border)
-                .frame(width: 1, height: 14)
             LayoutPicker(layout: $layout)
             OpenMenu()
-            if let path = session.rootURL?.path {
-                Text(path)
-                    .font(.system(size: 11))
-                    .foregroundStyle(Theme.secondary)
-                    .lineLimit(1)
-                    .truncationMode(.middle)
-                    .frame(maxWidth: 280, alignment: .leading)
-            }
-            Spacer(minLength: 8)
+            Spacer(minLength: 12)
             if session.phase != .empty, session.phase != .scanning {
                 Text(session.statusLine)
-                    .font(.system(size: 11))
-                    .foregroundStyle(Theme.secondary)
+                    .font(.system(size: 12, design: .monospaced))
+                    .foregroundStyle(Theme.chromeMuted)
                     .monospacedDigit()
                     .lineLimit(1)
+                    .layoutPriority(-1)
             }
-            if session.phase != .scanning, session.rootURL != nil {
-                Button("Scan") { session.rescan() }
-                    .buttonStyle(QuietButtonStyle())
+            if canRescan {
+                ChromeButton(title: "Scan", prominent: true) { session.rescan() }
             }
-            Button("Choose") { session.chooseFolder() }
-                .buttonStyle(QuietButtonStyle())
+            ChromeButton(title: "Choose", prominent: !canRescan) { session.chooseFolder() }
         }
+    }
+}
+
+private struct ChromeButton: View {
+    var title: String
+    var prominent: Bool
+    var action: () -> Void
+    @State private var hovered = false
+
+    var body: some View {
+        Button(action: action) {
+            Text(title)
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundStyle(prominent ? Theme.chromeInk : Theme.text)
+                .padding(.horizontal, 12)
+                .frame(height: 28)
+                .background {
+                    Capsule().fill(prominent ? Theme.chromeWhite : (hovered ? Theme.chromeHover : Color.clear))
+                }
+                .overlay {
+                    Capsule().strokeBorder(prominent ? Color.clear : Theme.chromeStroke, lineWidth: 1)
+                }
+                .contentShape(Capsule())
+        }
+        .buttonStyle(.plain)
+        .onHover { hovered = $0 }
     }
 }
 
@@ -162,17 +179,45 @@ private struct OpenMenu: View {
             Divider()
             Button("Choose Folder…") { session.chooseFolder() }
         } label: {
-            HStack(spacing: 4) {
-                Text(session.rootTitle)
-                    .lineLimit(1)
-                Image(systemName: "chevron.down")
-                    .font(.system(size: 8, weight: .bold))
-            }
-            .font(.system(size: 12))
-            .foregroundStyle(Theme.text)
+            crumb
+                .lineLimit(1)
         }
         .menuStyle(.borderlessButton)
+        .menuIndicator(.hidden)
         .fixedSize()
+        .help(session.rootURL?.path ?? "Open a folder")
+    }
+
+    private var crumb: Text {
+        let mark = Text(" \(Image(systemName: "chevron.down"))")
+            .font(.system(size: 8, weight: .semibold))
+            .foregroundStyle(Theme.chromeFaint)
+        if let url = session.rootURL {
+            let leaf = Text(session.rootTitle)
+                .font(.system(size: 12, weight: .medium, design: .monospaced))
+                .foregroundStyle(Theme.text)
+            if let parent = parentTitle(for: url) {
+                let head = Text(parent)
+                    .font(.system(size: 12, design: .monospaced))
+                    .foregroundStyle(Theme.chromeMuted)
+                let slash = Text(" / ")
+                    .font(.system(size: 12, design: .monospaced))
+                    .foregroundStyle(Theme.chromeFaint)
+                return head + slash + leaf + mark
+            }
+            return leaf + mark
+        }
+        return Text("Open")
+            .font(.system(size: 12, design: .monospaced))
+            .foregroundStyle(Theme.chromeMuted) + mark
+    }
+
+    private func parentTitle(for url: URL) -> String? {
+        let parent = url.deletingLastPathComponent()
+        if parent.path == "/" || parent.path == url.path { return nil }
+        let name = parent.lastPathComponent
+        if name.isEmpty || name == "/" { return nil }
+        return name
     }
 }
 
