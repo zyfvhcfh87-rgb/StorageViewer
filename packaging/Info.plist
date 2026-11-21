@@ -8,6 +8,8 @@
 	<string>StorageViewer</string>
 	<key>CFBundleExecutable</key>
 	<string>StorageViewer</string>
+	<key>CFBundleIconFile</key>
+	<string>AppIcon</string>
 	<key>CFBundleIdentifier</key>
 	<string>local.storageviewer.app</string>
 	<key>CFBundleInfoDictionaryVersion</key>
